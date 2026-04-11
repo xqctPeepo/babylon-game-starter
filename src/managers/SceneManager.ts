@@ -392,9 +392,11 @@ export class SceneManager {
             // Re-enable character after environment switch is complete
             if (this.characterController) {
                 this.characterController.resumePhysics();
-                // Also show the character mesh
+                // Only re-enable the player mesh if it is a real character model, not the
+                // display capsule (which should remain hidden until the model finishes loading)
                 const playerMesh = this.characterController.getPlayerMesh();
-                if (playerMesh) {
+                const displayCapsule = this.characterController.getDisplayCapsule();
+                if (playerMesh && playerMesh !== displayCapsule) {
                     playerMesh.isVisible = true;
                     playerMesh.setEnabled(true);
                 }
@@ -414,9 +416,11 @@ export class SceneManager {
             // Re-enable character even if there was an error
             if (this.characterController) {
                 this.characterController.resumePhysics();
-                // Also show the character mesh
+                // Only re-enable the player mesh if it is a real character model, not the
+                // display capsule (which should remain hidden until the model finishes loading)
                 const playerMesh = this.characterController.getPlayerMesh();
-                if (playerMesh) {
+                const displayCapsule = this.characterController.getDisplayCapsule();
+                if (playerMesh && playerMesh !== displayCapsule) {
                     playerMesh.isVisible = true;
                     playerMesh.setEnabled(true);
                 }
