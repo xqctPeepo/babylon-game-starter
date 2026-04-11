@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import { resolve } from 'path'
 
 export default defineConfig({
-  root: resolve(__dirname, 'src'),
+  root: resolve(__dirname, 'src/client'),
   server: {
     port: 3000,
     open: false,

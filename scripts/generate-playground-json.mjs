@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 const repoRoot = path.resolve(process.cwd());
-const srcRoot = path.join(repoRoot, 'src');
+const srcRoot = path.join(repoRoot, 'src', 'client');
 
 const exportRoots = [
   'config',
