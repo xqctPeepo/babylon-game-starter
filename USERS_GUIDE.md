@@ -43,6 +43,10 @@ This guide is designed for:
 - Developers familiar with TypeScript and JavaScript
 - Anyone wanting to create interactive 3D experiences in the browser
 
+### Deployment Documentation
+
+For full details on the settings-driven deployment system, service/runtime mapping, conditional language installs, and host-specific generation workflows, see [src/deployment/DEPLOYMENT.md](src/deployment/DEPLOYMENT.md).
+
 ---
 
 ## System Architecture

@@ -14,7 +14,8 @@ function assert(condition, message) {
 function validateSettings(settings) {
   const allowedHosts = new Set(['github.io', 'netlify', 'render.com']);
   const allowedTypes = new Set(['web-service', 'static']);
-  const allowedServiceTypes = new Set(['node', 'rust', 'go']);
+  const allowedServiceTypes = new Set(['node', 'rust', 'go', 'python']);
+  const allowedPythonFrameworks = new Set(['flask', 'falcon', 'bottle']);
 
   assert(allowedHosts.has(settings.host), `Unsupported host: ${settings.host}`);
   assert(allowedTypes.has(settings.type), `Unsupported deployment type: ${settings.type}`);
@@ -39,6 +40,18 @@ function validateSettings(settings) {
     );
     if (service.localPort !== undefined) {
       assert(Number.isInteger(service.localPort) && service.localPort > 0, `Invalid localPort for ${service.name}.`);
+    }
+
+    if (service.type === 'python') {
+      assert(
+        typeof service.pythonFramework === 'string' && allowedPythonFrameworks.has(service.pythonFramework),
+        `Python service ${service.name} requires pythonFramework: flask | falcon | bottle.`
+      );
+    } else {
+      assert(
+        service.pythonFramework === undefined,
+        `pythonFramework is only valid for python services: ${service.name}`
+      );
     }
   }
 }
@@ -105,6 +118,39 @@ async function scaffoldService(service) {
     }
     if (!(await fileExists(mainGo))) {
       await writeFile(mainGo, 'package main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("service starting")\n}\n');
+    }
+  }
+
+  if (service.type === 'python') {
+    const requirementsPath = path.join(serviceRoot, 'requirements.txt');
+    const appPath = path.join(serviceRoot, 'app.py');
+    const framework = service.pythonFramework;
+
+    if (!(await fileExists(requirementsPath))) {
+      await writeFile(requirementsPath, `${framework}\n`);
+    }
+
+    if (!(await fileExists(appPath))) {
+      if (framework === 'flask') {
+        await writeFile(
+          appPath,
+          `from flask import Flask\n\napp = Flask(__name__)\n\n@app.get('/health')\ndef health():\n    return {'ok': True, 'service': '${service.name}'}\n`
+        );
+      }
+
+      if (framework === 'falcon') {
+        await writeFile(
+          appPath,
+          `import falcon\n\nclass HealthResource:\n    def on_get(self, req, resp):\n        resp.media = {'ok': True, 'service': '${service.name}'}\n\napp = falcon.App()\napp.add_route('/health', HealthResource())\n`
+        );
+      }
+
+      if (framework === 'bottle') {
+        await writeFile(
+          appPath,
+          `from bottle import Bottle\n\napp = Bottle()\n\n@app.get('/health')\ndef health():\n    return {'ok': True, 'service': '${service.name}'}\n`
+        );
+      }
     }
   }
 }

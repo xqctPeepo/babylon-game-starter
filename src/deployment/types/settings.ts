@@ -1,13 +1,36 @@
 export type DeploymentHost = 'github.io' | 'netlify' | 'render.com';
 export type DeploymentType = 'web-service' | 'static';
-export type ServiceRuntime = 'node' | 'rust' | 'go';
+export type ServiceRuntime = 'node' | 'rust' | 'go' | 'python';
+export type PythonFramework = 'flask' | 'falcon' | 'bottle';
 
-export interface EndpointService {
+interface BaseEndpointService {
   name: string;
-  type: ServiceRuntime;
   routePrefix: `/${string}`;
   localPort?: number;
 }
+
+export interface NodeEndpointService extends BaseEndpointService {
+  type: 'node';
+}
+
+export interface RustEndpointService extends BaseEndpointService {
+  type: 'rust';
+}
+
+export interface GoEndpointService extends BaseEndpointService {
+  type: 'go';
+}
+
+export interface PythonEndpointService extends BaseEndpointService {
+  type: 'python';
+  pythonFramework: PythonFramework;
+}
+
+export type EndpointService =
+  | NodeEndpointService
+  | RustEndpointService
+  | GoEndpointService
+  | PythonEndpointService;
 
 export interface StaticDeploymentConfig {
   basePath?: `/${string}`;

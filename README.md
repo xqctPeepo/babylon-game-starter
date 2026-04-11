@@ -82,3 +82,5 @@ public/
 ## Documentation
 
 See [USERS_GUIDE.md](USERS_GUIDE.md) for full documentation including system architecture, configuration reference, and a narrative design guide.
+
+Deployment system documentation is available at [src/deployment/DEPLOYMENT.md](src/deployment/DEPLOYMENT.md).
