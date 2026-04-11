@@ -1250,6 +1250,73 @@ export class SettingsUI {
         return null;
     }
 
+    private static isPlaygroundHost(): boolean {
+        try {
+            return typeof window !== 'undefined' && window.location.hostname.includes('playground.babylonjs.com');
+        } catch {
+            return false;
+        }
+    }
+
+    private static getLocalInspectorState(): boolean {
+        const scene = this.getScene();
+        if (!scene) {
+            return false;
+        }
+
+        try {
+            return scene.debugLayer.isVisible();
+        } catch {
+            return false;
+        }
+    }
+
+    private static toggleLocalInspector(visible: boolean): void {
+        const scene = this.getScene();
+        if (!scene) {
+            return;
+        }
+
+        const forceResize = () => {
+            try {
+                scene.getEngine().resize();
+            } catch {
+                // Ignore resize errors.
+            }
+        };
+
+        const scheduleResizePasses = () => {
+            forceResize();
+            requestAnimationFrame(() => {
+                forceResize();
+                requestAnimationFrame(() => {
+                    forceResize();
+                });
+            });
+
+            setTimeout(() => {
+                forceResize();
+            }, 120);
+
+            setTimeout(() => {
+                forceResize();
+            }, 260);
+        };
+
+        try {
+            if (visible) {
+                void scene.debugLayer.show().then(() => {
+                    scheduleResizePasses();
+                });
+            } else {
+                scene.debugLayer.hide();
+                scheduleResizePasses();
+            }
+        } catch {
+            // Ignore local inspector errors.
+        }
+    }
+
     /**
      * Finds the Inspector container element (embed-host or embed)
      * @returns The element if found, null otherwise
@@ -1342,6 +1409,11 @@ export class SettingsUI {
             return visibility !== 'hidden' && display !== 'none';
         }
 
+        // Local dev fallback: read Babylon DebugLayer state directly from the scene.
+        if (!this.isPlaygroundHost()) {
+            return this.getLocalInspectorState();
+        }
+
         // If nothing found, assume inactive (default state)
         return false;
     }
@@ -1375,6 +1447,12 @@ export class SettingsUI {
                 button.click();
             }
         } else {
+            // In local runtime, use Babylon's DebugLayer API directly.
+            if (!this.isPlaygroundHost()) {
+                this.toggleLocalInspector(visible);
+                return;
+            }
+
             // Button not found, try delayed initialization
             this.attemptDelayedInspectorToggle(visible, 0);
         }

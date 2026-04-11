@@ -6,6 +6,7 @@
 import '@babylonjs/core/Legacy/legacy';
 import '@babylonjs/loaders/legacy/legacy';
 import '@babylonjs/materials/legacy/legacy';
+import '@babylonjs/inspector';
 import * as PhysicsV2 from '@babylonjs/core/Physics/v2/index';
 import { CreateAudioEngineAsync } from '@babylonjs/core/AudioV2/webAudio/webAudioEngine';
 import { CreateSoundAsync, CreateStreamingSoundAsync } from '@babylonjs/core/AudioV2/abstractAudio/audioEngineV2';
