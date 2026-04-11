@@ -6,14 +6,6 @@ export class NodeMaterialManager {
     private static scene: BABYLON.Scene | null = null;
     private static activeNodeMaterials: Map<string, BABYLON.NodeMaterial> = new Map();
 
-    private static shouldSkipForPlaygroundHost(): boolean {
-        try {
-            return typeof window !== 'undefined' && window.location.hostname.includes('playground.babylonjs.com');
-        } catch {
-            return false;
-        }
-    }
-
     /**
      * Initializes the NodeMaterialManager with a scene
      */
@@ -26,7 +18,7 @@ export class NodeMaterialManager {
      * @param mesh The mesh to process
      */
     public static async processMeshForNodeMaterial(mesh: BABYLON.Mesh): Promise<void> {
-        if (!this.scene || this.shouldSkipForPlaygroundHost()) {
+        if (!this.scene) {
             return;
         }
 
@@ -50,12 +42,28 @@ export class NodeMaterialManager {
                     // Parse the node material from the snippet only if not cached
                     nodeMaterial = await BABYLON.NodeMaterial.ParseFromSnippetAsync(snippetId, this.scene);
 
-                    if (nodeMaterial && typeof nodeMaterial === 'object') {
-                        // Store the node material for reuse (keyed by snippet ID)
-                        this.activeNodeMaterials.set(snippetId, nodeMaterial);
-                    } else {
+                    if (!nodeMaterial || typeof nodeMaterial !== 'object') {
                         return; // Failed to parse
                     }
+
+                    // Guard: ensure internal state is fully initialized before use.
+                    // animatedInputs being null indicates an incomplete build which would
+                    // crash the render loop — force a rebuild to resolve it.
+                    if ((nodeMaterial as BABYLON.NodeMaterial & { animatedInputs: unknown }).animatedInputs === null) {
+                        try {
+                            nodeMaterial.build(false);
+                        } catch {
+                            return; // Material is not usable
+                        }
+                    }
+
+                    // Final safety check before caching
+                    if ((nodeMaterial as BABYLON.NodeMaterial & { animatedInputs: unknown }).animatedInputs === null) {
+                        return; // Still not initialized — skip to avoid render-loop crash
+                    }
+
+                    // Store the node material for reuse (keyed by snippet ID)
+                    this.activeNodeMaterials.set(snippetId, nodeMaterial);
                 } catch {
                     return; // Parsing failed
                 }
@@ -78,7 +86,7 @@ export class NodeMaterialManager {
      * Processes meshes from a model import result
      */
     public static async processImportResult(result: { meshes: BABYLON.AbstractMesh[] }): Promise<void> {
-        if (!this.scene || this.shouldSkipForPlaygroundHost()) {
+        if (!this.scene) {
             return;
         }
 
@@ -95,7 +103,7 @@ export class NodeMaterialManager {
      * Processes meshes for node materials
      */
     public static async processMeshesForNodeMaterials(): Promise<void> {
-        if (!this.scene || this.shouldSkipForPlaygroundHost()) {
+        if (!this.scene) {
             return;
         }
 
