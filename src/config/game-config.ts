@@ -228,7 +228,7 @@ export const CONFIG: GameConfig = {
                 title: "Environment",
                 uiElement: "dropdown",
                 visibility: "all",
-                defaultValue: "Level Test", // Default to first environment
+                defaultValue: (ASSETS.ENVIRONMENTS.find((e) => e.isDefault)?.name ?? ASSETS.ENVIRONMENTS[0]?.name ?? ''), // Default to isDefault env or first
                 options: ASSETS.ENVIRONMENTS.map((environment) => environment.name),
                 onChange: async (value: boolean | string) => {
                     if (typeof value === 'string') {
