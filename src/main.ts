@@ -8,6 +8,7 @@ import '@babylonjs/loaders/legacy/legacy';
 import '@babylonjs/materials/legacy/legacy';
 import * as PhysicsV2 from '@babylonjs/core/Physics/v2/index';
 import { CreateAudioEngineAsync } from '@babylonjs/core/AudioV2/webAudio/webAudioEngine';
+import { CreateSoundAsync, CreateStreamingSoundAsync } from '@babylonjs/core/AudioV2/abstractAudio/audioEngineV2';
 
 import { Playground } from './index';
 
@@ -30,6 +31,8 @@ async function initializeRuntimeGlobals(): Promise<void> {
         (g.BABYLON as Record<string, unknown>).CharacterSupportedState = PhysicsV2.CharacterSupportedState as unknown;
         (g.BABYLON as Record<string, unknown>).CreateAudioEngineAsync = CreateAudioEngineAsync as unknown;
 
+        (g.BABYLON as Record<string, unknown>).CreateSoundAsync = CreateSoundAsync as unknown;
+        (g.BABYLON as Record<string, unknown>).CreateStreamingSoundAsync = CreateStreamingSoundAsync as unknown;
         // Babylon v9 rewrites default CDN paths to versioned URLs (e.g. /v9.2.0/...);
         // Draco decoder assets are not always published under versioned paths.
         const bjs = g.BABYLON as {
@@ -67,11 +70,12 @@ async function initializeRuntimeGlobals(): Promise<void> {
     }
 
     if (!g.__babylonAudioEngine) {
-        g.__babylonAudioEngine = await CreateAudioEngineAsync({
+        const audioEngine = await CreateAudioEngineAsync({
             volume: 1,
             listenerEnabled: true,
             listenerAutoUpdate: true
         });
+        g.__babylonAudioEngine = audioEngine as any;
     }
 }
 

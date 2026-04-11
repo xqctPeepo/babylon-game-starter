@@ -364,7 +364,11 @@ export class SceneManager {
             }
 
             // Process any existing meshes for node materials
-            await NodeMaterialManager.processMeshesForNodeMaterials();
+            try {
+                await NodeMaterialManager.processMeshesForNodeMaterials();
+            } catch (_error) {
+                // Ignore node material processing errors in Playground
+            }
 
             // Ambient sounds setup (positional, looped)
             if (environment.ambientSounds && environment.ambientSounds.length > 0) {

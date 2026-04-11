@@ -6,6 +6,14 @@ export class NodeMaterialManager {
     private static scene: BABYLON.Scene | null = null;
     private static activeNodeMaterials: Map<string, BABYLON.NodeMaterial> = new Map();
 
+    private static shouldSkipForPlaygroundHost(): boolean {
+        try {
+            return typeof window !== 'undefined' && window.location.hostname.includes('playground.babylonjs.com');
+        } catch {
+            return false;
+        }
+    }
+
     /**
      * Initializes the NodeMaterialManager with a scene
      */
@@ -18,7 +26,7 @@ export class NodeMaterialManager {
      * @param mesh The mesh to process
      */
     public static async processMeshForNodeMaterial(mesh: BABYLON.Mesh): Promise<void> {
-        if (!this.scene) {
+        if (!this.scene || this.shouldSkipForPlaygroundHost()) {
             return;
         }
 
@@ -38,18 +46,28 @@ export class NodeMaterialManager {
             let nodeMaterial = this.activeNodeMaterials.get(snippetId);
 
             if (!nodeMaterial) {
-                // Parse the node material from the snippet only if not cached
-                nodeMaterial = await BABYLON.NodeMaterial.ParseFromSnippetAsync(snippetId, this.scene);
+                try {
+                    // Parse the node material from the snippet only if not cached
+                    nodeMaterial = await BABYLON.NodeMaterial.ParseFromSnippetAsync(snippetId, this.scene);
 
-                if (nodeMaterial) {
-                    // Store the node material for reuse (keyed by snippet ID)
-                    this.activeNodeMaterials.set(snippetId, nodeMaterial);
+                    if (nodeMaterial && typeof nodeMaterial === 'object') {
+                        // Store the node material for reuse (keyed by snippet ID)
+                        this.activeNodeMaterials.set(snippetId, nodeMaterial);
+                    } else {
+                        return; // Failed to parse
+                    }
+                } catch {
+                    return; // Parsing failed
                 }
             }
 
             if (nodeMaterial) {
-                // Apply the node material to the mesh
-                mesh.material = nodeMaterial;
+                try {
+                    // Apply the node material to the mesh
+                    mesh.material = nodeMaterial;
+                } catch {
+                    // Failed to apply material
+                }
             }
         } catch (_error) {
             // Silently handle errors to match playground manager style
@@ -60,7 +78,7 @@ export class NodeMaterialManager {
      * Processes meshes from a model import result
      */
     public static async processImportResult(result: { meshes: BABYLON.AbstractMesh[] }): Promise<void> {
-        if (!this.scene) {
+        if (!this.scene || this.shouldSkipForPlaygroundHost()) {
             return;
         }
 
@@ -77,7 +95,7 @@ export class NodeMaterialManager {
      * Processes meshes for node materials
      */
     public static async processMeshesForNodeMaterials(): Promise<void> {
-        if (!this.scene) {
+        if (!this.scene || this.shouldSkipForPlaygroundHost()) {
             return;
         }
 

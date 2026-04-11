@@ -16,7 +16,7 @@
         | { success: false; error: string; details?: string };
 
     type ManagedSound = BABYLON.AbstractSound;
-    type ManagedStreamingSound = BABYLON.StreamingSound;
+    type ManagedStreamingSound = BABYLON.AbstractSound;
 
     export class EffectsManager {
         private static activeParticleSystems: Map<string, BABYLON.IParticleSystem> = new Map();
@@ -44,8 +44,40 @@
             return g.__babylonAudioEngine ?? null;
         }
 
+        private static async ensureAudioEngine(): Promise<BABYLON.AudioEngineV2 | null> {
+            const existing = this.getAudioEngine();
+            if (existing) {
+                return existing;
+            }
+
+            const g = globalThis as typeof globalThis & {
+                BABYLON?: Record<string, unknown>;
+                __babylonAudioEngine?: BABYLON.AudioEngineV2;
+            };
+
+            const createAudioEngineAsync = g.BABYLON?.CreateAudioEngineAsync as
+                | ((options?: Record<string, unknown>) => Promise<BABYLON.AudioEngineV2>)
+                | undefined;
+
+            if (typeof createAudioEngineAsync !== 'function') {
+                return null;
+            }
+
+            try {
+                const engine = await createAudioEngineAsync({
+                    volume: 1,
+                    listenerEnabled: true,
+                    listenerAutoUpdate: true
+                });
+                g.__babylonAudioEngine = engine as any;
+                return g.__babylonAudioEngine ?? null;
+            } catch {
+                return null;
+            }
+        }
+
         public static async ensureAudioReady(): Promise<boolean> {
-            const audioEngine = this.getAudioEngine();
+            const audioEngine = await this.ensureAudioEngine();
             if (!audioEngine) {
                 return false;
             }
@@ -118,12 +150,32 @@
                 this.backgroundMusic = null;
             }
 
-            const bgm = await BABYLON.CreateStreamingSoundAsync("environment_bgm", url, {
-                loop: true,
-                autoplay: false,
-                maxInstances: 1,
-                volume: 0
-            });
+            const createStreamingSoundAsync = (BABYLON as unknown as {
+                CreateStreamingSoundAsync?: (
+                    name: string,
+                    source: string,
+                    options?: Record<string, unknown>
+                ) => Promise<BABYLON.AbstractSound>;
+            }).CreateStreamingSoundAsync;
+
+            let bgm: BABYLON.AbstractSound;
+            if (typeof createStreamingSoundAsync === 'function') {
+                bgm = await createStreamingSoundAsync("environment_bgm", url, {
+                    loop: true,
+                    autoplay: false,
+                    maxInstances: 1,
+                    volume: 0
+                });
+            } else {
+                // Fallback for Playground runtimes without AudioV2 globals exposed.
+                bgm = await new Promise<ManagedStreamingSound>((resolve) => {
+                    const legacy = new BABYLON.Sound("environment_bgm", url, this.scene!, () => resolve(legacy as any), {
+                        loop: true,
+                        autoplay: false,
+                        volume: 0
+                    });
+                });
+            }
 
             this.backgroundMusic = bgm;
             bgm.play();
@@ -147,20 +199,40 @@
 
             await this.ensureAudioReady();
 
+            const createSoundAsync = (BABYLON as unknown as {
+                CreateSoundAsync?: (
+                    name: string,
+                    source: string,
+                    options?: Record<string, unknown>
+                ) => Promise<BABYLON.AbstractSound>;
+            }).CreateSoundAsync;
+
             // Ensure previous are cleared first
             this.removeAmbientSounds();
             for (const [index, cfg] of configs.entries()) {
                 try {
-                    const s = await BABYLON.CreateSoundAsync(`ambient_${index}`, cfg.url, {
-                        loop: true,
-                        autoplay: false,
-                        maxInstances: 1,
-                        volume: cfg.volume,
-                        spatialEnabled: true,
-                        spatialPosition: cfg.position.clone(),
-                        spatialRolloffFactor: cfg.rollOff ?? 2,
-                        spatialMaxDistance: cfg.maxDistance ?? 40
-                    });
+                    const s = typeof createSoundAsync === 'function'
+                        ? await createSoundAsync(`ambient_${index}`, cfg.url, {
+                            loop: true,
+                            autoplay: false,
+                            maxInstances: 1,
+                            volume: cfg.volume,
+                            spatialEnabled: true,
+                            spatialPosition: cfg.position.clone(),
+                            spatialRolloffFactor: cfg.rollOff ?? 2,
+                            spatialMaxDistance: cfg.maxDistance ?? 40
+                        })
+                        : await new Promise<ManagedSound>((resolve) => {
+                            const legacy = new BABYLON.Sound(`ambient_${index}`, cfg.url, this.scene!, () => resolve(legacy as any), {
+                                loop: true,
+                                autoplay: false,
+                                volume: cfg.volume,
+                                spatialSound: true,
+                                maxDistance: cfg.maxDistance ?? 40,
+                                rolloffFactor: cfg.rollOff ?? 2
+                            });
+                            legacy.setPosition(cfg.position.clone());
+                        });
 
                     s.play();
                     this.ambientSounds.push(s);
@@ -513,12 +585,28 @@
             try {
                 await this.ensureAudioReady();
 
-                const sound = await BABYLON.CreateSoundAsync(soundName, soundConfig.url, {
-                    volume: soundConfig.volume,
-                    loop: soundConfig.loop,
-                    autoplay: false,
-                    maxInstances: 1
-                });
+                const createSoundAsync = (BABYLON as unknown as {
+                    CreateSoundAsync?: (
+                        name: string,
+                        source: string,
+                        options?: Record<string, unknown>
+                    ) => Promise<BABYLON.AbstractSound>;
+                }).CreateSoundAsync;
+
+                const sound = typeof createSoundAsync === 'function'
+                    ? await createSoundAsync(soundName, soundConfig.url, {
+                        volume: soundConfig.volume,
+                        loop: soundConfig.loop,
+                        autoplay: false,
+                        maxInstances: 1
+                    })
+                    : await new Promise<ManagedSound>((resolve) => {
+                        const legacy = new BABYLON.Sound(soundName, soundConfig.url, this.scene!, () => resolve(legacy as any), {
+                            volume: soundConfig.volume,
+                            loop: soundConfig.loop,
+                            autoplay: false
+                        });
+                    });
 
                 this.activeSounds.set(soundName, sound);
 
