@@ -5,6 +5,7 @@
 // /// <reference path="../types/babylon.d.ts" />
 
 import { MOBILE_CONTROLS } from '../config/mobile-controls';
+import { EffectsManager } from '../managers/EffectsManager';
 
 export class MobileInputManager {
     private static isInitialized = false;
@@ -24,6 +25,12 @@ export class MobileInputManager {
     private static inputDirection = new BABYLON.Vector3(0, 0, 0);
     private static wantJump = false;
     private static wantBoost = false;
+
+    private static preventDefaultIfCancelable(e: Event): void {
+        if (e.cancelable) {
+            e.preventDefault();
+        }
+    }
 
     /**
      * Initializes mobile touch controls
@@ -337,7 +344,7 @@ export class MobileInputManager {
      * @param e Touch or Pointer event
      */
     private static handleJoystickTouchStart(e: TouchEvent | PointerEvent): void {
-        e.preventDefault();
+        this.preventDefaultIfCancelable(e);
         if ('touches' in e && e.touches.length > 0) {
             this.joystickActive = true;
             this.joystickTouchId = e.touches[0].identifier;
@@ -354,7 +361,7 @@ export class MobileInputManager {
      * @param e Touch or Pointer event
      */
     private static handleJoystickTouchMove(e: TouchEvent | PointerEvent): void {
-        e.preventDefault();
+        this.preventDefaultIfCancelable(e);
         if (!this.joystickActive) return;
 
         if ('touches' in e) {
@@ -374,7 +381,7 @@ export class MobileInputManager {
      * @param e Touch, Pointer, or Mouse event
      */
     private static handleJoystickTouchEnd(e: TouchEvent | PointerEvent | MouseEvent): void {
-        e.preventDefault();
+        this.preventDefaultIfCancelable(e);
         this.joystickActive = false;
         this.joystickTouchId = null;
         this.resetJoystick();
@@ -503,7 +510,7 @@ export class MobileInputManager {
      * @param e Touch or Pointer event
      */
     private static handleJumpTouchStart(e: TouchEvent | PointerEvent): void {
-        e.preventDefault();
+        this.preventDefaultIfCancelable(e);
         this.jumpActive = true;
         this.wantJump = true;
 
@@ -523,7 +530,7 @@ export class MobileInputManager {
      * @param e Touch, Pointer, or Mouse event
      */
     private static handleJumpTouchEnd(e: TouchEvent | PointerEvent | MouseEvent): void {
-        e.preventDefault();
+        this.preventDefaultIfCancelable(e);
         this.jumpActive = false;
         this.wantJump = false;
         this.jumpTouchId = null;
@@ -541,7 +548,9 @@ export class MobileInputManager {
      * @param e Touch or Pointer event
      */
     private static handleBoostTouchStart(e: TouchEvent | PointerEvent): void {
-        e.preventDefault();
+        this.preventDefaultIfCancelable(e);
+
+        void EffectsManager.ensureAudioReady();
         this.boostActive = true;
         this.wantBoost = true;
 
@@ -561,7 +570,7 @@ export class MobileInputManager {
      * @param e Touch, Pointer, or Mouse event
      */
     private static handleBoostTouchEnd(e: TouchEvent | PointerEvent | MouseEvent): void {
-        e.preventDefault();
+        this.preventDefaultIfCancelable(e);
         e.stopPropagation();
 
         // Reset all boost states immediately

@@ -235,6 +235,7 @@ export class SceneManager {
 
     private async setupEffects(): Promise<void> {
         EffectsManager.initialize(this.scene);
+        EffectsManager.attachAudioListener(this.camera);
         NodeMaterialManager.initialize(this.scene);
         await EffectsManager.createSound("Thruster");
     }

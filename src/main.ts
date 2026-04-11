@@ -7,6 +7,7 @@ import '@babylonjs/core/Legacy/legacy';
 import '@babylonjs/loaders/legacy/legacy';
 import '@babylonjs/materials/legacy/legacy';
 import * as PhysicsV2 from '@babylonjs/core/Physics/v2/index';
+import { CreateAudioEngineAsync } from '@babylonjs/core/AudioV2/webAudio/webAudioEngine';
 
 import { Playground } from './index';
 
@@ -19,6 +20,7 @@ async function initializeRuntimeGlobals(): Promise<void> {
         BABYLON?: Record<string, unknown>;
         HavokPhysics?: () => Promise<unknown>;
         HK?: unknown;
+        __babylonAudioEngine?: BABYLON.AudioEngineV2;
     };
 
     // Ensure v2 physics APIs are available on global BABYLON (Playground-style access).
@@ -26,6 +28,7 @@ async function initializeRuntimeGlobals(): Promise<void> {
         Object.assign(g.BABYLON as Record<string, unknown>, PhysicsV2 as Record<string, unknown>);
         (g.BABYLON as Record<string, unknown>).PhysicsCharacterController = PhysicsV2.PhysicsCharacterController as unknown;
         (g.BABYLON as Record<string, unknown>).CharacterSupportedState = PhysicsV2.CharacterSupportedState as unknown;
+        (g.BABYLON as Record<string, unknown>).CreateAudioEngineAsync = CreateAudioEngineAsync as unknown;
 
         // Babylon v9 rewrites default CDN paths to versioned URLs (e.g. /v9.2.0/...);
         // Draco decoder assets are not always published under versioned paths.
@@ -61,6 +64,14 @@ async function initializeRuntimeGlobals(): Promise<void> {
 
     if (typeof g.HK === 'undefined') {
         g.HK = await g.HavokPhysics();
+    }
+
+    if (!g.__babylonAudioEngine) {
+        g.__babylonAudioEngine = await CreateAudioEngineAsync({
+            volume: 1,
+            listenerEnabled: true,
+            listenerAutoUpdate: true
+        });
     }
 }
 

@@ -15,14 +15,17 @@
         | { success: true; material: null }
         | { success: false; error: string; details?: string };
 
+    type ManagedSound = BABYLON.AbstractSound;
+    type ManagedStreamingSound = BABYLON.StreamingSound;
+
     export class EffectsManager {
         private static activeParticleSystems: Map<string, BABYLON.IParticleSystem> = new Map();
         private static environmentParticleSystems: Map<string, BABYLON.IParticleSystem> = new Map();
         private static itemParticleSystems: Map<string, BABYLON.IParticleSystem> = new Map();
-        private static activeSounds: Map<string, BABYLON.Sound> = new Map();
+        private static activeSounds: Map<string, ManagedSound> = new Map();
         private static scene: BABYLON.Scene | null = null;
-        private static backgroundMusic: BABYLON.Sound | null = null;
-        private static ambientSounds: BABYLON.Sound[] = [];
+        private static backgroundMusic: ManagedStreamingSound | null = null;
+        private static ambientSounds: ManagedSound[] = [];
         private static originalEdgeSettings: Map<string, { width?: number; color?: BABYLON.Color4; enabled?: boolean }> = new Map();
 
         /**
@@ -33,8 +36,49 @@
             this.scene = scene;
         }
 
+        private static getAudioEngine(): BABYLON.AudioEngineV2 | null {
+            const g = globalThis as typeof globalThis & {
+                __babylonAudioEngine?: BABYLON.AudioEngineV2;
+            };
+
+            return g.__babylonAudioEngine ?? null;
+        }
+
+        public static async ensureAudioReady(): Promise<boolean> {
+            const audioEngine = this.getAudioEngine();
+            if (!audioEngine) {
+                return false;
+            }
+
+            try {
+                await audioEngine.unlockAsync();
+
+                if (audioEngine.state !== 'running') {
+                    await audioEngine.resumeAsync();
+                }
+
+                return audioEngine.state === 'running';
+            } catch {
+                return false;
+            }
+        }
+
+        public static attachAudioListener(listenerNode: BABYLON.Node | null): void {
+            const audioEngine = this.getAudioEngine();
+            if (!audioEngine) {
+                return;
+            }
+
+            if (listenerNode) {
+                audioEngine.listener.attach(listenerNode);
+                return;
+            }
+
+            audioEngine.listener.detach();
+        }
+
         // Fades a sound's volume from -> to over ms; resolves when complete
-        private static async fade(sound: BABYLON.Sound, from: number, to: number, ms: number): Promise<void> {
+            private static async fade(sound: ManagedSound, from: number, to: number, ms: number): Promise<void> {
             if (!this.scene || ms <= 0) {
                 sound.setVolume(to);
                 return Promise.resolve();
@@ -61,30 +105,35 @@
             if (!this.scene) {
                 return;
             }
+
+            await this.ensureAudioReady();
+
             // Fade out and dispose existing
             if (this.backgroundMusic) {
                 try {
-                    await this.fade(this.backgroundMusic, this.backgroundMusic.getVolume(), 0, fadeMs);
+                    await this.fade(this.backgroundMusic, this.backgroundMusic.volume, 0, fadeMs);
                 } catch { /* no-op */ }
                 this.backgroundMusic.stop();
                 this.backgroundMusic.dispose();
                 this.backgroundMusic = null;
             }
-            // Create new non-positional looping sound
-            const bgm = new BABYLON.Sound("environment_bgm", url, this.scene, undefined, {
+
+            const bgm = await BABYLON.CreateStreamingSoundAsync("environment_bgm", url, {
                 loop: true,
-                autoplay: true,
-                spatialSound: false,
+                autoplay: false,
+                maxInstances: 1,
                 volume: 0
             });
+
             this.backgroundMusic = bgm;
+            bgm.play();
             await this.fade(bgm, 0, volume, fadeMs);
         }
 
         public static async stopAndDisposeBackgroundMusic(fadeMs: number = 1000): Promise<void> {
             if (!this.backgroundMusic) return;
             try {
-                await this.fade(this.backgroundMusic, this.backgroundMusic.getVolume(), 0, fadeMs);
+                await this.fade(this.backgroundMusic, this.backgroundMusic.volume, 0, fadeMs);
             } catch { /* no-op */ }
             this.backgroundMusic.stop();
             this.backgroundMusic.dispose();
@@ -95,24 +144,25 @@
             if (!this.scene) {
                 return;
             }
+
+            await this.ensureAudioReady();
+
             // Ensure previous are cleared first
             this.removeAmbientSounds();
-            for (const cfg of configs) {
+            for (const [index, cfg] of configs.entries()) {
                 try {
-                    const s = new BABYLON.Sound("ambient", cfg.url, this.scene, undefined, {
+                    const s = await BABYLON.CreateSoundAsync(`ambient_${index}`, cfg.url, {
                         loop: true,
-                        autoplay: true,
-                        spatialSound: true,
-                        volume: cfg.volume
+                        autoplay: false,
+                        maxInstances: 1,
+                        volume: cfg.volume,
+                        spatialEnabled: true,
+                        spatialPosition: cfg.position.clone(),
+                        spatialRolloffFactor: cfg.rollOff ?? 2,
+                        spatialMaxDistance: cfg.maxDistance ?? 40
                     });
-                    s.setPosition(cfg.position);
-                    // Defaults: rollOff=2, maxDistance=40
-                    if (typeof s.rolloffFactor === 'number') {
-                        s.rolloffFactor = (cfg.rollOff ?? 2);
-                    }
-                    if (typeof s.maxDistance === 'number') {
-                        s.maxDistance = (cfg.maxDistance ?? 40);
-                    }
+
+                    s.play();
                     this.ambientSounds.push(s);
                 } catch (_e) {
                     // Ignore sound loading errors
@@ -445,9 +495,14 @@
          * @param soundName Name of the sound effect to create
          * @returns The created sound or null if not found
          */
-        public static async createSound(soundName: string): Promise<BABYLON.Sound | null> {
+        public static async createSound(soundName: string): Promise<ManagedSound | null> {
             if (!this.scene) {
                 return null;
+            }
+
+            const existingSound = this.activeSounds.get(soundName);
+            if (existingSound) {
+                return existingSound;
             }
 
             const soundConfig = CONFIG.EFFECTS.SOUND_EFFECTS.find(s => s.name === soundName);
@@ -456,15 +511,14 @@
             }
 
             try {
-                const sound = new BABYLON.Sound(soundName, soundConfig.url, this.scene, undefined, {
-                    volume: soundConfig.volume,
-                    loop: soundConfig.loop
-                });
+                await this.ensureAudioReady();
 
-                // Add basic sound event handling
-                sound.onended = () => {
-                    // Sound ended
-                };
+                const sound = await BABYLON.CreateSoundAsync(soundName, soundConfig.url, {
+                    volume: soundConfig.volume,
+                    loop: soundConfig.loop,
+                    autoplay: false,
+                    maxInstances: 1
+                });
 
                 this.activeSounds.set(soundName, sound);
 
@@ -480,7 +534,7 @@
          */
         public static playSound(soundName: string): void {
             const sound = this.activeSounds.get(soundName);
-            if (sound && !sound.isPlaying) {
+            if (sound && sound.activeInstancesCount === 0) {
                 sound.play();
             }
         }
@@ -491,7 +545,7 @@
          */
         public static stopSound(soundName: string): void {
             const sound = this.activeSounds.get(soundName);
-            if (sound?.isPlaying === true) {
+            if (sound && sound.activeInstancesCount > 0) {
                 sound.stop();
             }
         }
@@ -501,7 +555,7 @@
          * @param soundName Name of the sound effect
          * @returns The sound or null if not found
          */
-        public static getSound(soundName: string): BABYLON.Sound | null {
+        public static getSound(soundName: string): ManagedSound | null {
             return this.activeSounds.get(soundName) ?? null;
         }
 

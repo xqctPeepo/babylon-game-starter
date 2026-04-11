@@ -12,6 +12,7 @@ import { INPUT_KEYS } from '../config/input-keys';
 import { ASSETS } from '../config/assets';
 import { AnimationController } from './AnimationController';
 import type { SmoothFollowCameraController } from './SmoothFollowCameraController';
+import { EffectsManager } from '../managers/EffectsManager';
 
 import { MobileInputManager } from '../input/MobileInputManager';
 
@@ -31,7 +32,7 @@ export class CharacterController {
     private superJumpActive = false;
     private invisibilityActive = false;
     private playerParticleSystem: BABYLON.IParticleSystem | null = null;
-    private thrusterSound: BABYLON.Sound | null = null;
+    private thrusterSound: BABYLON.AbstractSound | null = null;
     public animationController: AnimationController;
 
     // Mobile device detection - computed once at initialization
@@ -251,6 +252,8 @@ export class CharacterController {
         } else if (INPUT_KEYS.JUMP.includes(key as any)) {
             this.wantJump = true;
         } else if (INPUT_KEYS.BOOST.includes(key as any)) {
+            void EffectsManager.ensureAudioReady();
+
             this.boostActive = true;
             this.updateParticleSystem();
         } else if (INPUT_KEYS.DEBUG.includes(key as any)) {
@@ -356,8 +359,16 @@ export class CharacterController {
                 this.inputDirection.x = 0;
 
                 // Use mobile input for actions
-                this.wantJump = MobileInputManager.getWantJump();
-                this.boostActive = MobileInputManager.getWantBoost();
+                // On touch-capable devices with a physical keyboard, preserve keyboard actions.
+                const keyboardJumpPressed = INPUT_KEYS.JUMP.some(key => this.keysDown.has(key));
+                const keyboardBoostPressed = INPUT_KEYS.BOOST.some(key => this.keysDown.has(key));
+
+                if (!keyboardJumpPressed) {
+                    this.wantJump = MobileInputManager.getWantJump();
+                }
+                if (!keyboardBoostPressed) {
+                    this.boostActive = MobileInputManager.getWantBoost();
+                }
             }
 
             // Always update particle system to ensure proper on/off state
@@ -395,11 +406,11 @@ export class CharacterController {
         // Update thruster sound
         if (this.thrusterSound) {
             if (this.boostActive) {
-                if (!this.thrusterSound.isPlaying) {
+                if (this.thrusterSound.activeInstancesCount === 0) {
                     this.thrusterSound.play();
                 }
             } else {
-                if (this.thrusterSound.isPlaying) {
+                if (this.thrusterSound.activeInstancesCount > 0) {
                     this.thrusterSound.stop();
                 }
             }
@@ -409,6 +420,12 @@ export class CharacterController {
     private updateCharacter = (): void => {
         // Update mobile input every frame
         this.updateMobileInput();
+
+        // Retry boost sound start while boost is held, in case the file finished loading
+        // after the initial key/touch event attempted playback.
+        if (this.boostActive) {
+            this.updateParticleSystem();
+        }
 
         // Apply invisibility effect if active
         this.updateInvisibilityEffect();
@@ -793,10 +810,15 @@ export class CharacterController {
         return this.playerParticleSystem;
     }
 
-    public setThrusterSound(sound: BABYLON.Sound): void {
+    public setThrusterSound(sound: BABYLON.AbstractSound): void {
         this.thrusterSound = sound;
         // Start with sound stopped
         sound.stop();
+
+        // If boost was already active before sound assignment/load, start immediately.
+        if (this.boostActive && sound.activeInstancesCount === 0) {
+            sound.play();
+        }
     }
 
     /**
