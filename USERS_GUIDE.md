@@ -29,7 +29,7 @@ Babylon Game Starter is a configuration-driven game development framework that t
 - **Rapid Prototyping**: Get a working game running in minutes, not hours
 - **Easy Customization**: Modify game behavior through configuration files
 - **Extensible Architecture**: Add new features by extending existing managers
-- **No Build Step**: Works directly in the Babylon.js Playground—no compilation needed
+- **Playground Export**: Export your game to the Babylon.js web editor with `npm run export:playground`
 - **Community Ready**: Share your creations easily with the #BabylonGameStarter hashtag
 - **Type Safety**: Catch errors at development time, not runtime
 - **Best Practices**: Built-in patterns for common game development tasks
@@ -53,7 +53,7 @@ Babylon Game Starter follows a modular, manager-based architecture where each sy
 
 The system is organized into several key layers:
 
-1. **Entry Point** (`index.ts`): Initializes the playground and coordinates UI setup
+1. **Entry Point** (`index.ts`): Initializes the scene and coordinates UI setup
 2. **Scene Manager**: Orchestrates all systems and manages the game scene
 3. **Managers**: Handle specific subsystems (effects, inventory, collectibles, etc.)
 4. **Controllers**: Manage gameplay mechanics (character movement, camera, animations)
@@ -224,10 +224,10 @@ The **EffectsManager** handles all visual and audio effects:
 - Item collection effects
 - Player effects (thruster, boost)
 
-**Audio:**
+**Audio (Babylon.js AudioV2):**
 - Background music with crossfading
 - Ambient positional sounds
-- Sound effects
+- Sound effects via `CreateSoundAsync`
 - Volume management
 
 **Visual Effects:**
@@ -263,7 +263,7 @@ The **HUDManager** displays:
 - Time elapsed
 - FPS counter
 
-All HUD elements are configurable and can be toggled for mobile/desktop.
+All HUD elements are individually configurable. The HUD adapts to three device classes — desktop, mobile, and iPad with external keyboard — each with its own visibility settings defined in `config/game-config.ts`.
 
 ### Mobile Controls
 
