@@ -3,7 +3,7 @@ services:
     name: babylon-game-starter
     env: docker
     plan: free
-    region: maine
+    region: oregon
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /
@@ -11,3 +11,5 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: 10000

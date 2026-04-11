@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "export:playground": "node scripts/generate-playground-json.mjs"
+    "export:playground": "node scripts/generate-playground-json.mjs",
+    "deploy:prepare": "node src/deployment/scripts/prepare-deployment.mjs"
   },
   "dependencies": {
     "@babylonjs/core": "^9.1.0",
