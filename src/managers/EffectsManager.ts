@@ -28,6 +28,13 @@
         private static ambientSounds: ManagedSound[] = [];
         private static originalEdgeSettings: Map<string, { width?: number; color?: BABYLON.Color4; enabled?: boolean }> = new Map();
 
+        private static async withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+            const timeout = new Promise<null>((resolve) => {
+                setTimeout(() => resolve(null), timeoutMs);
+            });
+            return (await Promise.race([promise, timeout])) as T | null;
+        }
+
         /**
          * Initializes the EffectsManager with a scene
          * @param scene The Babylon.js scene
@@ -83,10 +90,10 @@
             }
 
             try {
-                await audioEngine.unlockAsync();
+                await this.withTimeout(audioEngine.unlockAsync(), 300);
 
                 if (audioEngine.state !== 'running') {
-                    await audioEngine.resumeAsync();
+                    await this.withTimeout(audioEngine.resumeAsync(), 300);
                 }
 
                 return audioEngine.state === 'running';
@@ -138,7 +145,7 @@
                 return;
             }
 
-            await this.ensureAudioReady();
+            void this.ensureAudioReady();
 
             // Fade out and dispose existing
             if (this.backgroundMusic) {
@@ -197,7 +204,7 @@
                 return;
             }
 
-            await this.ensureAudioReady();
+            void this.ensureAudioReady();
 
             const createSoundAsync = (BABYLON as unknown as {
                 CreateSoundAsync?: (
@@ -583,7 +590,7 @@
             }
 
             try {
-                await this.ensureAudioReady();
+                void this.ensureAudioReady();
 
                 const createSoundAsync = (BABYLON as unknown as {
                     CreateSoundAsync?: (
