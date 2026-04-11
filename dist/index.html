@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Babylon Game Starter</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 100%;
+            height: 100vh;
+            overflow: hidden;
+            background: #1a1a1a;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        }
+
+        canvas#renderCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* Loading screen */
+        #loadingScreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            transition: opacity 0.5s ease;
+        }
+
+        #loadingScreen.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .loading-content {
+            text-align: center;
+            color: white;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            margin: 0 auto 20px;
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .loading-content h1 {
+            font-size: 28px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .loading-content p {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+
+        /* Debug info (bottom left) */
+        #debugInfo {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #00ff00;
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            z-index: 100;
+            pointer-events: none;
+            line-height: 1.4;
+            max-width: 300px;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        body.debug-enabled #debugInfo {
+            opacity: 1;
+        }
+
+        /* FPS Counter (bottom right) */
+        #fpsCounter {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #00ff00;
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 14px;
+            z-index: 100;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        body.debug-enabled #fpsCounter {
+            opacity: 1;
+        }
+
+        /* Keyboard hint (top left) */
+        #keyboardHint {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #aaa;
+            padding: 12px 16px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            z-index: 100;
+            pointer-events: none;
+        }
+    </style>
+  <script type="module" crossorigin src="/assets/index-Cxp3GRZP.js"></script>
+</head>
+<body>
+    <!-- Loading screen -->
+    <div id="loadingScreen">
+        <div class="loading-content">
+            <div class="spinner"></div>
+            <h1>Babylon Game Starter</h1>
+            <p>Loading your playground...</p>
+        </div>
+    </div>
+
+    <!-- Render canvas -->
+    <canvas id="renderCanvas"></canvas>
+
+    <!-- Debug info -->
+    <div id="debugInfo">
+        <div><strong>Debug Mode</strong></div>
+        <div id="debugContent"></div>
+    </div>
+
+    <!-- FPS Counter -->
+    <div id="fpsCounter">
+        FPS: <span id="fpsValue">0</span>
+    </div>
+
+    <!-- Keyboard hint -->
+    <div id="keyboardHint">
+        Press <strong>D</strong> to toggle debug mode
+    </div>
+
+    <!-- Playground-style physics runtime globals -->
+    <script src="https://cdn.babylonjs.com/havok/HavokPhysics_umd.js"></script>
+
+    <!-- Main script -->
+
+    <script>
+        // Initialize loading screen hide after 2 seconds
+        // (will be hidden when scene is ready)
+        setTimeout(() => {
+            const loadingScreen = document.getElementById('loadingScreen');
+            if (loadingScreen && !loadingScreen.classList.contains('hidden')) {
+                console.log('[index.html] Scene took longer than 2 seconds, hiding loading screen automatically');
+                loadingScreen.classList.add('hidden');
+            }
+        }, 2000);
+
+        // Debug mode toggle with 'D' key
+        let debugMode = false;
+        document.addEventListener('keydown', (event) => {
+            if (event.key.toLowerCase() === 'd') {
+                debugMode = !debugMode;
+                document.body.classList.toggle('debug-enabled', debugMode);
+                console.log('[index.html] Debug mode:', debugMode);
+            }
+        });
+
+        // Simple FPS counter
+        let frameCount = 0;
+        let lastTime = performance.now();
+        function updateFPS() {
+            frameCount++;
+            const currentTime = performance.now();
+            if (currentTime - lastTime >= 1000) {
+                document.getElementById('fpsValue').textContent = frameCount;
+                frameCount = 0;
+                lastTime = currentTime;
+            }
+            requestAnimationFrame(updateFPS);
+        }
+        updateFPS();
+
+        // Update debug info
+        function updateDebugInfo() {
+            const debugContent = document.getElementById('debugContent');
+            const babylon = (window).__babylon;
+            if (babylon) {
+                const engine = babylon.engine?.();
+                const scene = babylon.scene?.();
+                if (engine && scene) {
+                    debugContent.innerHTML = `
+                        <div>Engine: ${engine.webGLVersion === 2 ? 'WebGL 2' : 'WebGL 1'}</div>
+                        <div>Meshes: ${scene.meshes.length}</div>
+                        <div>Lights: ${scene.lights.length}</div>
+                        <div>Cameras: ${scene.cameras.length}</div>
+                        <div>Materials: ${scene.materials.length}</div>
+                    `;
+                }
+            }
+            requestAnimationFrame(updateDebugInfo);
+        }
+        updateDebugInfo();
+
+        // Hide loading screen when scene is ready
+        function hideLoadingScreen() {
+            const loadingScreen = document.getElementById('loadingScreen');
+            if (loadingScreen && !loadingScreen.classList.contains('hidden')) {
+                console.log('[index.html] Scene ready, hiding loading screen');
+                loadingScreen.classList.add('hidden');
+            }
+        }
+
+        // Hook into Babylon scene ready event
+        setInterval(() => {
+            const babylon = (window).__babylon;
+            if (babylon && babylon.scene?.()) {
+                hideLoadingScreen();
+            }
+        }, 100);
+    </script>
+</body>
+</html>

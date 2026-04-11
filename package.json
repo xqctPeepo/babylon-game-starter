@@ -1,0 +1,25 @@
+{
+  "name": "babylon-game-starter-vite",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "export:playground": "node scripts/generate-playground-json.mjs"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^9.1.0",
+    "@babylonjs/gui": "^9.1.0",
+    "@babylonjs/havok": "^1.3.12",
+    "@babylonjs/loaders": "^9.1.0",
+    "@babylonjs/materials": "^9.1.0"
+  },
+  "devDependencies": {
+    "babylonjs": "^9.1.0",
+    "babylonjs-loaders": "^9.1.0",
+    "babylonjs-materials": "^9.1.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.8"
+  }
+}
