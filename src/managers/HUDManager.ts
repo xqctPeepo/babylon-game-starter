@@ -16,6 +16,8 @@ export class HUDManager {
     private static fpsCounter: number = 0;
     private static fpsLastTime: number = 0;
     private static currentFPS: number = 0;
+    private static isMobile: boolean = false;
+    private static isIPadWithKeyboard: boolean = false;
 
     /**
      * Initializes the HUD with a scene and character controller
@@ -27,20 +29,27 @@ export class HUDManager {
         this.scene = scene;
         this.characterController = characterController;
         this.startTime = Date.now();
+
+        // Detect device type once at initialization
+        this.isIPadWithKeyboard = /iPad/.test(navigator.userAgent) && navigator.maxTouchPoints > 0;
+        this.isMobile = !this.isIPadWithKeyboard && (
+            /Android|webOS|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+            ('ontouchstart' in window) ||
+            (navigator.maxTouchPoints > 0)
+        );
+
         this.createHUD();
 
-        // Detect if this is a mobile device
-        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
-            ('ontouchstart' in window) ||
-            (navigator.maxTouchPoints > 0);
-
         // Set initial visibility for all HUD elements based on device type
-        this.setElementVisibility('coordinates', isMobile ? CONFIG.HUD.MOBILE.SHOW_COORDINATES : CONFIG.HUD.SHOW_COORDINATES);
-        this.setElementVisibility('time', isMobile ? CONFIG.HUD.MOBILE.SHOW_TIME : CONFIG.HUD.SHOW_TIME);
-        this.setElementVisibility('fps', isMobile ? CONFIG.HUD.MOBILE.SHOW_FPS : CONFIG.HUD.SHOW_FPS);
-        this.setElementVisibility('state', isMobile ? CONFIG.HUD.MOBILE.SHOW_STATE : CONFIG.HUD.SHOW_STATE);
-        this.setElementVisibility('boost', isMobile ? CONFIG.HUD.MOBILE.SHOW_BOOST_STATUS : CONFIG.HUD.SHOW_BOOST_STATUS);
-        this.setElementVisibility('credits', isMobile ? CONFIG.HUD.MOBILE.SHOW_CREDITS : CONFIG.HUD.SHOW_CREDITS);
+        const hudCfg = this.isIPadWithKeyboard ? CONFIG.HUD.IPadWithKeyboard
+            : this.isMobile ? CONFIG.HUD.MOBILE
+            : CONFIG.HUD;
+        this.setElementVisibility('coordinates', hudCfg.SHOW_COORDINATES);
+        this.setElementVisibility('time', hudCfg.SHOW_TIME);
+        this.setElementVisibility('fps', hudCfg.SHOW_FPS);
+        this.setElementVisibility('state', hudCfg.SHOW_STATE);
+        this.setElementVisibility('boost', hudCfg.SHOW_BOOST_STATUS);
+        this.setElementVisibility('credits', hudCfg.SHOW_CREDITS);
 
         // Start the update loop
         this.startUpdateLoop();
@@ -229,16 +238,12 @@ export class HUDManager {
     private static updateHUD(): void {
         if (!this.scene || !this.characterController) return;
 
-        // Detect if this is a mobile device
-        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
-            ('ontouchstart' in window) ||
-            (navigator.maxTouchPoints > 0);
-        
-        // Detect iPad with keyboard
-        const isIPadWithKeyboard = this.isIPadWithKeyboard();
+        const hudCfg = this.isIPadWithKeyboard ? CONFIG.HUD.IPadWithKeyboard
+            : this.isMobile ? CONFIG.HUD.MOBILE
+            : CONFIG.HUD;
 
         // Update coordinates
-        if (isIPadWithKeyboard || (isMobile ? CONFIG.HUD.MOBILE.SHOW_COORDINATES : CONFIG.HUD.SHOW_COORDINATES)) {
+        if (hudCfg.SHOW_COORDINATES) {
             this.updateCoordinates();
             this.setElementVisibility('coordinates', true);
         } else {
@@ -246,7 +251,7 @@ export class HUDManager {
         }
 
         // Update time
-        if (isIPadWithKeyboard || (isMobile ? CONFIG.HUD.MOBILE.SHOW_TIME : CONFIG.HUD.SHOW_TIME)) {
+        if (hudCfg.SHOW_TIME) {
             this.updateTime();
             this.setElementVisibility('time', true);
         } else {
@@ -254,7 +259,7 @@ export class HUDManager {
         }
 
         // Update FPS
-        if (isIPadWithKeyboard || (isMobile ? CONFIG.HUD.MOBILE.SHOW_FPS : CONFIG.HUD.SHOW_FPS)) {
+        if (hudCfg.SHOW_FPS) {
             this.updateFPS();
             this.setElementVisibility('fps', true);
         } else {
@@ -262,7 +267,7 @@ export class HUDManager {
         }
 
         // Update state
-        if (isIPadWithKeyboard || (isMobile ? CONFIG.HUD.MOBILE.SHOW_STATE : CONFIG.HUD.SHOW_STATE)) {
+        if (hudCfg.SHOW_STATE) {
             this.updateState();
             this.setElementVisibility('state', true);
         } else {
@@ -270,7 +275,7 @@ export class HUDManager {
         }
 
         // Update boost status
-        if (isIPadWithKeyboard || (isMobile ? CONFIG.HUD.MOBILE.SHOW_BOOST_STATUS : CONFIG.HUD.SHOW_BOOST_STATUS)) {
+        if (hudCfg.SHOW_BOOST_STATUS) {
             this.updateBoostStatus();
             this.setElementVisibility('boost', true);
         } else {
@@ -278,7 +283,7 @@ export class HUDManager {
         }
 
         // Update credits
-        if (isIPadWithKeyboard || (isMobile ? CONFIG.HUD.MOBILE.SHOW_CREDITS : CONFIG.HUD.SHOW_CREDITS)) {
+        if (hudCfg.SHOW_CREDITS) {
             this.updateCredits();
             this.setElementVisibility('credits', true);
         } else {
@@ -461,13 +466,6 @@ export class HUDManager {
             case 'cooldown': return '#ff4444';
             default: return CONFIG.HUD.SECONDARY_COLOR;
         }
-    }
-
-    /**
-     * Checks if this is an iPad with keyboard
-     */
-    private static isIPadWithKeyboard(): boolean {
-        return /iPad/.test(navigator.userAgent) && navigator.maxTouchPoints > 0;
     }
 
     /**
