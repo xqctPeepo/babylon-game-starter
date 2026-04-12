@@ -45,6 +45,7 @@ export class CharacterController {
     private keyboardDetectionTimeout: number | null = null;
     private physicsPaused: boolean = false;
     private currentCharacter: Character | null = null;
+    private lastAppliedInvisibility: boolean | null = null;
 
     constructor(scene: BABYLON.Scene) {
         this.scene = scene;
@@ -749,7 +750,8 @@ export class CharacterController {
     public setPlayerMesh(mesh: BABYLON.AbstractMesh): void {
         this.playerMesh = mesh;
         mesh.scaling.setAll(CONFIG.ANIMATION.PLAYER_SCALE);
-        
+        this.lastAppliedInvisibility = null;
+
         // Hide display capsule when real character model is loaded
         if (mesh !== this.displayCapsule) {
             this.displayCapsule.isVisible = false;
@@ -887,18 +889,21 @@ export class CharacterController {
      */
     private updateInvisibilityEffect(): void {
         if (!this.playerMesh) return;
-        
-        // Apply invisibility by adjusting material alpha on main mesh AND all child meshes
+
+        // Avoid reapplying alpha values unless invisibility state changed.
+        if (this.lastAppliedInvisibility === this.invisibilityActive) {
+            return;
+        }
+
+        const alpha = this.invisibilityActive ? 0.25 : 1.0;
         const allMeshes = [this.playerMesh, ...this.playerMesh.getChildMeshes()];
         allMeshes.forEach(mesh => {
             if (mesh.material) {
-                if (this.invisibilityActive) {
-                    mesh.material.alpha = 0.25;
-                } else {
-                    mesh.material.alpha = 1.0;
-                }
+                mesh.material.alpha = alpha;
             }
         });
+
+        this.lastAppliedInvisibility = this.invisibilityActive;
     }
 
     /**

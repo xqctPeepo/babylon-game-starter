@@ -287,12 +287,12 @@ export class SkyManager {
                     const sineValue = Math.sin(elapsed * this.colorEffect.frequency * 2 * Math.PI);
                     const blendFactor = (1 + sineValue) / 2;
 
-                    // Apply additive color blending
+                    // Apply additive color blending without allocating a new Color3 each frame.
                     const r = Math.max(0, Math.min(1, this.colorEffect.originalEmissiveColor.r + (this.colorEffect.color.r * blendFactor)));
                     const g = Math.max(0, Math.min(1, this.colorEffect.originalEmissiveColor.g + (this.colorEffect.color.g * blendFactor)));
                     const b = Math.max(0, Math.min(1, this.colorEffect.originalEmissiveColor.b + (this.colorEffect.color.b * blendFactor)));
 
-                    material.emissiveColor = new BABYLON.Color3(r, g, b);
+                    material.emissiveColor.set(r, g, b);
                 }
             }
         }

@@ -342,12 +342,13 @@ export class CollectiblesManager {
 
         const characterPosition = this.characterController.getDisplayCapsule().position;
         const collectionRadius = 1.5; // Default collection radius
+        const collectionRadiusSquared = collectionRadius * collectionRadius;
 
         for (const [id, collectible] of this.collectibles) {
             if (this.collectedItems.has(id)) continue;
 
-            const distance = BABYLON.Vector3.Distance(characterPosition, collectible.position);
-            if (distance < collectionRadius) {
+            const distanceSquared = BABYLON.Vector3.DistanceSquared(characterPosition, collectible.position);
+            if (distanceSquared < collectionRadiusSquared) {
                 this.collectItem(id);
             }
         }

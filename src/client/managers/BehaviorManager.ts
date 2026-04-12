@@ -199,8 +199,9 @@ export class BehaviorManager {
             return false;
         }
 
-        const distance = BABYLON.Vector3.Distance(characterPosition, instancePosition);
-        const isWithinRadius = distance <= config.radius;
+        const radiusSquared = config.radius * config.radius;
+        const distanceSquared = BABYLON.Vector3.DistanceSquared(characterPosition, instancePosition);
+        const isWithinRadius = distanceSquared <= radiusSquared;
 
         if (config.triggerOutOfRange === true) {
             return !isWithinRadius;

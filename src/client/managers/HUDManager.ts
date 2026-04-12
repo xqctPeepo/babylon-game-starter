@@ -9,6 +9,8 @@ import { CollectiblesManager } from './CollectiblesManager';
 export class HUDManager {
     private static hudContainer: HTMLDivElement | null = null;
     private static hudElements: Map<string, HTMLDivElement> = new Map();
+    private static hudValueElements: Map<string, HTMLSpanElement> = new Map();
+    private static elementVisibility: Map<string, boolean> = new Map();
     private static scene: BABYLON.Scene | null = null;
     private static characterController: CharacterController | null = null;
     private static startTime: number = 0;
@@ -18,6 +20,14 @@ export class HUDManager {
     private static currentFPS: number = 0;
     private static isMobile: boolean = false;
     private static isIPadWithKeyboard: boolean = false;
+    private static activeHudConfig: {
+        readonly SHOW_COORDINATES: boolean;
+        readonly SHOW_TIME: boolean;
+        readonly SHOW_FPS: boolean;
+        readonly SHOW_STATE: boolean;
+        readonly SHOW_BOOST_STATUS: boolean;
+        readonly SHOW_CREDITS: boolean;
+    };
 
     /**
      * Initializes the HUD with a scene and character controller
@@ -29,6 +39,7 @@ export class HUDManager {
         this.scene = scene;
         this.characterController = characterController;
         this.startTime = Date.now();
+        this.activeHudConfig = CONFIG.HUD;
 
         // Detect device type once at initialization
         this.isIPadWithKeyboard = /iPad/.test(navigator.userAgent) && navigator.maxTouchPoints > 0;
@@ -41,15 +52,15 @@ export class HUDManager {
         this.createHUD();
 
         // Set initial visibility for all HUD elements based on device type
-        const hudCfg = this.isIPadWithKeyboard ? CONFIG.HUD.IPadWithKeyboard
+        this.activeHudConfig = this.isIPadWithKeyboard ? CONFIG.HUD.IPadWithKeyboard
             : this.isMobile ? CONFIG.HUD.MOBILE
             : CONFIG.HUD;
-        this.setElementVisibility('coordinates', hudCfg.SHOW_COORDINATES);
-        this.setElementVisibility('time', hudCfg.SHOW_TIME);
-        this.setElementVisibility('fps', hudCfg.SHOW_FPS);
-        this.setElementVisibility('state', hudCfg.SHOW_STATE);
-        this.setElementVisibility('boost', hudCfg.SHOW_BOOST_STATUS);
-        this.setElementVisibility('credits', hudCfg.SHOW_CREDITS);
+        this.setElementVisibility('coordinates', this.activeHudConfig.SHOW_COORDINATES);
+        this.setElementVisibility('time', this.activeHudConfig.SHOW_TIME);
+        this.setElementVisibility('fps', this.activeHudConfig.SHOW_FPS);
+        this.setElementVisibility('state', this.activeHudConfig.SHOW_STATE);
+        this.setElementVisibility('boost', this.activeHudConfig.SHOW_BOOST_STATUS);
+        this.setElementVisibility('credits', this.activeHudConfig.SHOW_CREDITS);
 
         // Start the update loop
         this.startUpdateLoop();
@@ -86,16 +97,8 @@ export class HUDManager {
             canvasParent.appendChild(this.hudContainer);
         }
 
-        // Set up FPS counter
-        this.scene.onBeforeRenderObservable.add(() => {
-            this.fpsCounter++;
-            const currentTime = Date.now();
-            if (currentTime - this.fpsLastTime >= 1000) {
-                this.currentFPS = this.fpsCounter;
-                this.fpsCounter = 0;
-                this.fpsLastTime = currentTime;
-            }
-        });
+        // Initialize FPS counter baseline once; per-frame counting happens in updateFPS.
+        this.fpsLastTime = Date.now();
     }
 
     /**
@@ -162,6 +165,8 @@ export class HUDManager {
 
         this.hudContainer.appendChild(element);
         this.hudElements.set(id, element);
+        this.hudValueElements.set(id, valueSpan);
+        this.elementVisibility.set(id, false);
     }
 
     /**
@@ -238,12 +243,8 @@ export class HUDManager {
     private static updateHUD(): void {
         if (!this.scene || !this.characterController) return;
 
-        const hudCfg = this.isIPadWithKeyboard ? CONFIG.HUD.IPadWithKeyboard
-            : this.isMobile ? CONFIG.HUD.MOBILE
-            : CONFIG.HUD;
-
         // Update coordinates
-        if (hudCfg.SHOW_COORDINATES) {
+        if (this.activeHudConfig.SHOW_COORDINATES) {
             this.updateCoordinates();
             this.setElementVisibility('coordinates', true);
         } else {
@@ -251,7 +252,7 @@ export class HUDManager {
         }
 
         // Update time
-        if (hudCfg.SHOW_TIME) {
+        if (this.activeHudConfig.SHOW_TIME) {
             this.updateTime();
             this.setElementVisibility('time', true);
         } else {
@@ -259,7 +260,7 @@ export class HUDManager {
         }
 
         // Update FPS
-        if (hudCfg.SHOW_FPS) {
+        if (this.activeHudConfig.SHOW_FPS) {
             this.updateFPS();
             this.setElementVisibility('fps', true);
         } else {
@@ -267,7 +268,7 @@ export class HUDManager {
         }
 
         // Update state
-        if (hudCfg.SHOW_STATE) {
+        if (this.activeHudConfig.SHOW_STATE) {
             this.updateState();
             this.setElementVisibility('state', true);
         } else {
@@ -275,7 +276,7 @@ export class HUDManager {
         }
 
         // Update boost status
-        if (hudCfg.SHOW_BOOST_STATUS) {
+        if (this.activeHudConfig.SHOW_BOOST_STATUS) {
             this.updateBoostStatus();
             this.setElementVisibility('boost', true);
         } else {
@@ -283,7 +284,7 @@ export class HUDManager {
         }
 
         // Update credits
-        if (hudCfg.SHOW_CREDITS) {
+        if (this.activeHudConfig.SHOW_CREDITS) {
             this.updateCredits();
             this.setElementVisibility('credits', true);
         } else {
@@ -295,68 +296,56 @@ export class HUDManager {
      * Updates the coordinates display
      */
     private static updateCoordinates(): void {
-        const element = this.hudElements.get('coordinates');
-        if (!element || !this.characterController) return;
+        const coordsValue = this.hudValueElements.get('coordinates');
+        if (!coordsValue || !this.characterController) return;
 
         const position = this.characterController.getPosition();
-        const coordsValue = element.querySelector('#hud-coordinates-value');
-        if (coordsValue) {
-            coordsValue.textContent = `${position.x.toFixed(1)}, ${position.y.toFixed(1)}, ${position.z.toFixed(1)}`;
-        }
+        coordsValue.textContent = `${position.x.toFixed(1)}, ${position.y.toFixed(1)}, ${position.z.toFixed(1)}`;
     }
 
     /**
      * Updates the time display
      */
     private static updateTime(): void {
-        const element = this.hudElements.get('time');
-        if (!element) return;
+        const timeValue = this.hudValueElements.get('time');
+        if (!timeValue) return;
 
         const elapsed = Date.now() - this.startTime;
         const minutes = Math.floor(elapsed / 60000);
         const seconds = Math.floor((elapsed % 60000) / 1000);
-        const timeValue = element.querySelector('#hud-time-value');
-        if (timeValue) {
-            timeValue.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-        }
+        timeValue.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
     }
 
     /**
      * Updates the FPS display
      */
     private static updateFPS(): void {
-        const element = this.hudElements.get('fps');
-        if (!element || !this.scene) return;
+        const fpsValue = this.hudValueElements.get('fps');
+        if (!fpsValue || !this.scene) return;
 
         this.fpsCounter++;
         const currentTime = Date.now();
-        
+
         if (currentTime - this.fpsLastTime >= 1000) {
             this.currentFPS = Math.round((this.fpsCounter * 1000) / (currentTime - this.fpsLastTime));
             this.fpsCounter = 0;
             this.fpsLastTime = currentTime;
         }
 
-        const fpsValue = element.querySelector('#hud-fps-value');
-        if (fpsValue instanceof HTMLElement) {
-            fpsValue.textContent = this.currentFPS.toString();
-            fpsValue.style.color = this.currentFPS < 30 ? '#ff4444' : CONFIG.HUD.PRIMARY_COLOR;
-        }
+        fpsValue.textContent = this.currentFPS.toString();
+        fpsValue.style.color = this.currentFPS < 30 ? '#ff4444' : CONFIG.HUD.PRIMARY_COLOR;
     }
 
     /**
      * Updates the character state display
      */
     private static updateState(): void {
-        const element = this.hudElements.get('state');
-        if (!element || !this.characterController) return;
+        const stateValue = this.hudValueElements.get('state');
+        if (!stateValue || !this.characterController) return;
 
         const state = this.characterController.getCurrentState();
-        const stateValue = element.querySelector('#hud-state-value');
-        if (stateValue instanceof HTMLElement) {
-            stateValue.textContent = state;
-            stateValue.style.color = this.getStateColor(state);
-        }
+        stateValue.textContent = state;
+        stateValue.style.color = this.getStateColor(state);
     }
 
     /**
@@ -364,20 +353,18 @@ export class HUDManager {
      */
     private static updateBoostStatus(): void {
         const element = this.hudElements.get('boost');
-        if (!element || !this.characterController) return;
+        const boostValue = this.hudValueElements.get('boost');
+        if (!element || !boostValue || !this.characterController) return;
 
         const isBoosting = this.characterController.isBoosting();
-        const boostValue = element.querySelector('#hud-boost-value');
-        if (boostValue instanceof HTMLElement) {
-            if (isBoosting) {
-                boostValue.textContent = 'ACTIVE';
-                boostValue.style.color = '#44ff44';
-                element.classList.add('hud-boost-active');
-            } else {
-                boostValue.textContent = 'Inactive';
-                boostValue.style.color = '#ff4444';
-                element.classList.remove('hud-boost-active');
-            }
+        if (isBoosting) {
+            boostValue.textContent = 'ACTIVE';
+            boostValue.style.color = '#44ff44';
+            element.classList.add('hud-boost-active');
+        } else {
+            boostValue.textContent = 'Inactive';
+            boostValue.style.color = '#ff4444';
+            element.classList.remove('hud-boost-active');
         }
     }
 
@@ -385,15 +372,12 @@ export class HUDManager {
      * Updates the credits display
      */
     private static updateCredits(): void {
-        const element = this.hudElements.get('credits');
-        if (!element) return;
+        const creditsValue = this.hudValueElements.get('credits');
+        if (!creditsValue) return;
 
         // Get credits from CollectiblesManager
         const credits = CollectiblesManager.getTotalCredits();
-        const creditsValue = element.querySelector('#hud-credits-value');
-        if (creditsValue) {
-            creditsValue.textContent = credits.toString();
-        }
+        creditsValue.textContent = credits.toString();
     }
 
     /**
@@ -401,23 +385,33 @@ export class HUDManager {
      */
     private static setElementVisibility(elementId: string, visible: boolean): void {
         const element = this.hudElements.get(elementId);
-        if (element) {
-            if (visible && element.style.display === 'none') {
-                element.style.display = 'block';
-                // Mark element as faded in after animation completes so it doesn't re-trigger
-                if (!element.classList.contains('faded-in')) {
-                    const handleAnimationEnd = () => {
-                        if (element) {
-                            element.classList.add('faded-in');
-                        }
-                        element.removeEventListener('animationend', handleAnimationEnd);
-                    };
-                    element.addEventListener('animationend', handleAnimationEnd, { once: true });
-                }
-            } else {
-                element.style.display = visible ? 'block' : 'none';
-            }
+        if (!element) {
+            return;
         }
+
+        const currentVisibility = this.elementVisibility.get(elementId);
+        if (currentVisibility === visible) {
+            return;
+        }
+
+        this.elementVisibility.set(elementId, visible);
+
+        if (visible) {
+            element.style.display = 'block';
+            // Mark element as faded in after animation completes so it doesn't re-trigger
+            if (!element.classList.contains('faded-in')) {
+                const handleAnimationEnd = () => {
+                    if (element) {
+                        element.classList.add('faded-in');
+                    }
+                    element.removeEventListener('animationend', handleAnimationEnd);
+                };
+                element.addEventListener('animationend', handleAnimationEnd, { once: true });
+            }
+            return;
+        }
+
+        element.style.display = 'none';
     }
 
     /**
@@ -493,6 +487,8 @@ export class HUDManager {
         }
         
         this.hudElements.clear();
+        this.hudValueElements.clear();
+        this.elementVisibility.clear();
         this.scene = null;
         this.characterController = null;
     }
@@ -518,6 +514,8 @@ export class HUDManager {
         // Reset static properties
         this.hudContainer = null;
         this.hudElements.clear();
+        this.hudValueElements.clear();
+        this.elementVisibility.clear();
         this.scene = null;
         this.characterController = null;
         this.startTime = 0;
