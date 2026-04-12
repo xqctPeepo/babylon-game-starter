@@ -46,6 +46,8 @@ export class CharacterController {
     private physicsPaused: boolean = false;
     private currentCharacter: Character | null = null;
     private lastAppliedInvisibility: boolean | null = null;
+    private customAnimationHandlers: Map<string, { name: string; loop: boolean }> = new Map(); // Map: key → custom animation config
+    private activeLoopingCustomAnimationKey: string | null = null;
 
     constructor(scene: BABYLON.Scene) {
         this.scene = scene;
@@ -172,11 +174,86 @@ export class CharacterController {
         return false; // Will be updated by the event listener
     }
 
+    /**
+     * Type guard: checks if a value is a custom animation config object
+     * Uses runtime checks to avoid user-defined type guards
+     */
+    private isCustomAnimationConfig(value: unknown): boolean {
+        return (
+            value !== null &&
+            typeof value === 'object' &&
+            Reflect.has(value, 'name') &&
+            Reflect.has(value, 'key') &&
+            Reflect.has(value, 'loop') &&
+            typeof Reflect.get(value, 'name') === 'string' &&
+            typeof Reflect.get(value, 'key') === 'string' &&
+            typeof Reflect.get(value, 'loop') === 'boolean'
+        );
+    }
+
+    /**
+     * Sets up key-triggered handlers for custom animations defined in the current character
+     * Only custom animations (object format) are configured here.
+     * Called when a character is fully loaded.
+     */
+    private setupCustomAnimationHandlers(): void {
+        // Clear any previous handlers
+        this.customAnimationHandlers.clear();
+
+        if (!this.currentCharacter) return;
+
+        const { animations } = this.currentCharacter;
+
+        // Iterate through animation entries
+        for (const [animKey, animValue] of Object.entries(animations)) {
+            // Skip standard animations (idle, walk, jump)
+            if (animKey === 'idle' || animKey === 'walk' || animKey === 'jump') {
+                continue;
+            }
+
+            if (typeof animValue !== 'object' || animValue === null) {
+                continue;
+            }
+
+            // Check if this is a custom animation config
+            if (!this.isCustomAnimationConfig(animValue)) {
+                continue;
+            }
+
+            const triggerKeyValue = Reflect.get(animValue, 'key');
+            const animationNameValue = Reflect.get(animValue, 'name');
+            const loopValue = Reflect.get(animValue, 'loop');
+
+            if (typeof triggerKeyValue !== 'string' || typeof animationNameValue !== 'string' || typeof loopValue !== 'boolean') {
+                continue;
+            }
+
+            const triggerKey = triggerKeyValue.toLowerCase();
+            const animationName = animationNameValue;
+            const loop = loopValue;
+
+            // Map key → custom animation config for quick lookup in handleKeyDown
+            this.customAnimationHandlers.set(triggerKey, { name: animationName, loop });
+        }
+    }
+
+    /**
+     * Clears all custom animation handlers when character is dismissed
+     */
+    private clearCustomAnimationHandlers(): void {
+        this.customAnimationHandlers.clear();
+        this.activeLoopingCustomAnimationKey = null;
+    }
+
     private handleKeyboard = (kbInfo: BABYLON.KeyboardInfo): void => {
         const key = kbInfo.event.key.toLowerCase();
 
         switch (kbInfo.type) {
             case BABYLON.KeyboardEventTypes.KEYDOWN:
+                // Ignore OS key-repeat events for held keys
+                if (this.keysDown.has(key)) {
+                    return;
+                }
                 this.keysDown.add(key);
                 this.handleKeyDown(key);
                 break;
@@ -238,6 +315,20 @@ export class CharacterController {
     };
 
     private handleKeyDown(key: string): void {
+        // Check for custom animation trigger first - takes priority
+        const customAnimation = this.customAnimationHandlers.get(key);
+        if (customAnimation) {
+            // Trigger the custom animation with configured loop behavior
+            this.animationController.playAnimation(customAnimation.name, customAnimation.loop);
+
+            // Keep looped custom animations active while the key is held.
+            if (customAnimation.loop) {
+                this.activeLoopingCustomAnimationKey = key;
+            }
+
+            return; // Don't process other keybinds for this key
+        }
+
         // Movement input
         if (this.isForwardKey(key)) {
             this.inputDirection.z = 1;
@@ -275,6 +366,11 @@ export class CharacterController {
     }
 
     private handleKeyUp(key: string): void {
+        // Release held-loop lock for custom animations when key is released.
+        if (this.activeLoopingCustomAnimationKey === key) {
+            this.activeLoopingCustomAnimationKey = null;
+        }
+
         // Reset movement input
         if (this.isForwardKey(key) || this.isBackwardKey(key)) {
             this.inputDirection.z = 0;
@@ -485,6 +581,14 @@ export class CharacterController {
     }
 
     private updateAnimations(): void {
+        // While a looped custom animation key is held, suppress locomotion animation overrides.
+        if (
+            this.activeLoopingCustomAnimationKey !== null &&
+            this.keysDown.has(this.activeLoopingCustomAnimationKey)
+        ) {
+            return;
+        }
+
         const isMoving = this.isAnyMovementKeyPressed();
 
         // Update animation controller with character state
@@ -777,6 +881,9 @@ export class CharacterController {
         // Store current character for physics calculations
         this.currentCharacter = character;
 
+    // Set up custom animation handlers for the loaded character
+    this.setupCustomAnimationHandlers();
+
         // Update character-specific physics attributes
         // Note: PhysicsCharacterController doesn't allow runtime updates of capsule dimensions
         // The display capsule can be updated for visual feedback
@@ -1037,6 +1144,13 @@ export class CharacterController {
         this.wantJump = false;
         this.boostActive = false;
         this.state = CHARACTER_STATES.IN_AIR;
+    }
+
+    /**
+     * Public method to clear custom animation handlers (called when character is switched/dismissed)
+     */
+    public dismissCustomAnimationHandlers(): void {
+        this.clearCustomAnimationHandlers();
     }
 
     public dispose(): void {

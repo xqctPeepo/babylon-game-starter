@@ -732,6 +732,10 @@ export class SceneManager {
             const cachedMeshes = this.characterCache.get(this.currentCharacterName)!;
             cachedMeshes.forEach(mesh => {
                 mesh.setEnabled(false);
+                        // Clear custom animation handlers for the dismissed character
+                        if (this.characterController) {
+                            this.characterController.dismissCustomAnimationHandlers();
+                        }
             });
         }
     }

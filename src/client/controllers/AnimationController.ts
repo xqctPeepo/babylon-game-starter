@@ -96,19 +96,36 @@ export class AnimationController {
     }
 
     /**
-     * Starts a new animation directly (no blending)
+     * Triggers a specific animation by name, used for key-triggered custom animations.
      */
-    private startAnimation(animationName: string): void {
-        // First try to find the animation by exact name
+    public playAnimation(animationName: string, loop: boolean): void {
+        const targetAnimation = this.findAnimationGroup(animationName);
+        if (!targetAnimation) {
+            return;
+        }
+
+        // No-op only if this animation is already the active one
+        if (this.currentAnimation === targetAnimation.name) {
+            return;
+        }
+
+        this.startAnimation(targetAnimation.name, loop);
+    }
+
+    /**
+     * Finds an animation group by exact, partial, or known fallback naming.
+     */
+    private findAnimationGroup(animationName: string): BABYLON.AnimationGroup | null {
+        // First try exact name
         let animation = this.scene.getAnimationGroupByName(animationName);
 
-        // If not found, try to find it by partial name match
+        // Then try partial name matching
         animation ??= this.scene.animationGroups.find((anim: BABYLON.AnimationGroup) =>
             anim.name.toLowerCase().includes(animationName.toLowerCase()) ||
             animationName.toLowerCase().includes(anim.name.toLowerCase())
         ) ?? null;
 
-        // If still not found, try common fallbacks
+        // Finally, try common movement-state fallbacks
         if (!animation) {
             if (animationName.toLowerCase().includes('idle')) {
                 animation = this.scene.animationGroups.find((anim: BABYLON.AnimationGroup) =>
@@ -130,6 +147,15 @@ export class AnimationController {
             }
         }
 
+        return animation;
+    }
+
+    /**
+     * Starts a new animation directly (no blending)
+     */
+    private startAnimation(animationName: string, loop: boolean = true): void {
+        const animation = this.findAnimationGroup(animationName);
+
         if (!animation) {
             return;
         }
@@ -142,7 +168,8 @@ export class AnimationController {
         });
 
         // Start the new animation
-        animation.start(true);
+        animation.weight = 1.0;
+        animation.start(loop);
         this.currentAnimation = animation.name; // Use the actual animation name
         this.previousAnimation = null;
         this.isBlending = false;

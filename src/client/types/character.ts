@@ -6,10 +6,21 @@ export type ItemEffect = {
     readonly [K in ItemEffectKind]: (_characterController: CharacterController) => void;
 };
 
+// Custom animation config: a named animation triggered by a specific key
+export interface CustomAnimationConfig {
+    readonly name: string; // Animation group name in the GLB
+    readonly key: string;  // Keyboard key to trigger (e.g., "j", "d")
+    readonly loop: boolean; // Whether the custom animation should loop when triggered
+}
+
+// Animation entries can be either standard strings or custom animation configs
+export type AnimationEntry = string | CustomAnimationConfig;
+
 export interface CharacterAnims {
     readonly idle: string;
     readonly walk: string;
     readonly jump: string;
+    readonly [key: string]: AnimationEntry; // Allow custom animations with any key name
 }
 
 export interface Character {
