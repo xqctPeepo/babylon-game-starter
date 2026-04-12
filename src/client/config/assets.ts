@@ -8,6 +8,9 @@ import type { SkyType, EffectType } from '../types/effects';
 import type { BehaviorConfig } from '../types/behaviors';
 import { OBJECT_ROLE } from '../types/environment';
 
+const EMPTY_LIGHTMAPPED_MESHES: readonly LightmappedMesh[] = [];
+const EMPTY_PHYSICS_OBJECTS: readonly PhysicsObject[] = [];
+
 export const ASSETS = {
     CHARACTERS: [
         {
@@ -287,8 +290,8 @@ export const ASSETS = {
             model: "https://raw.githubusercontent.com/EricEisaman/assets/main/environment/mushroom_village.glb",
             lightmap: "",
             scale: 3.0,
-            lightmappedMeshes: [] as readonly LightmappedMesh[],
-            physicsObjects: [] as readonly PhysicsObject[],
+            lightmappedMeshes: EMPTY_LIGHTMAPPED_MESHES,
+            physicsObjects: EMPTY_PHYSICS_OBJECTS,
             sky: {
                 TEXTURE_URL: "https://raw.githubusercontent.com/EricEisaman/game-dev-1a/main/assets/images/skies/happy_fluffy_sky.png",
                 ROTATION_Y: 0,
@@ -414,8 +417,8 @@ export const ASSETS = {
             model: "https://raw.githubusercontent.com/EricEisaman/assets/main/environment/city-flat.glb",
             lightmap: "",
             scale: 1.0,
-            lightmappedMeshes: [] as readonly LightmappedMesh[],
-            physicsObjects: [] as readonly PhysicsObject[],
+            lightmappedMeshes: EMPTY_LIGHTMAPPED_MESHES,
+            physicsObjects: EMPTY_PHYSICS_OBJECTS,
             sky: {
                 TEXTURE_URL: "https://raw.githubusercontent.com/EricEisaman/game-dev-1a/main/assets/images/skies/happy_fluffy_sky.png",
                 ROTATION_Y: 0,
@@ -437,8 +440,8 @@ export const ASSETS = {
             model: "https://raw.githubusercontent.com/EricEisaman/assets/main/environment/dystopia.glb",
             lightmap: "",
             scale: 2,
-            lightmappedMeshes: [] as readonly LightmappedMesh[],
-            physicsObjects: [] as readonly PhysicsObject[],
+            lightmappedMeshes: EMPTY_LIGHTMAPPED_MESHES,
+            physicsObjects: EMPTY_PHYSICS_OBJECTS,
             sky: {
                 TEXTURE_URL: "https://raw.githubusercontent.com/EricEisaman/game-dev-1a/main/assets/images/skies/happy_fluffy_sky.png",
                 ROTATION_Y: 0,
@@ -460,8 +463,8 @@ export const ASSETS = {
             model: "https://raw.githubusercontent.com/EricEisaman/assets/main/environment/rv_life.glb",
             lightmap: "",
             scale: 2.3,
-            lightmappedMeshes: [] as readonly LightmappedMesh[],
-            physicsObjects: [] as readonly PhysicsObject[],
+            lightmappedMeshes: EMPTY_LIGHTMAPPED_MESHES,
+            physicsObjects: EMPTY_PHYSICS_OBJECTS,
             backgroundMusic: {
                 url: "https://raw.githubusercontent.com/EricEisaman/assets/main/audio/bgm/HappyBDayJosh.mp3",
                 volume: 0.1
@@ -574,8 +577,8 @@ export const ASSETS = {
             model: "https://raw.githubusercontent.com/EricEisaman/assets/main/environment/monochrome.glb",
             lightmap: "",
             scale: 1,
-            lightmappedMeshes: [] as readonly LightmappedMesh[],
-            physicsObjects: [] as readonly PhysicsObject[],
+            lightmappedMeshes: EMPTY_LIGHTMAPPED_MESHES,
+            physicsObjects: EMPTY_PHYSICS_OBJECTS,
             sky: {
                 TEXTURE_URL: "https://raw.githubusercontent.com/EricEisaman/game-dev-1a/main/assets/images/skies/happy_fluffy_sky.png",
                 ROTATION_Y: 0,
@@ -592,8 +595,8 @@ export const ASSETS = {
             model: "https://raw.githubusercontent.com/EricEisaman/game-dev-1a/main/assets/models/environments/mansion/mansion.glb",
             lightmap: "",
             scale: 10,
-            lightmappedMeshes: [] as readonly LightmappedMesh[],
-            physicsObjects: [] as readonly PhysicsObject[],
+            lightmappedMeshes: EMPTY_LIGHTMAPPED_MESHES,
+            physicsObjects: EMPTY_PHYSICS_OBJECTS,
             sky: {
                 TEXTURE_URL: "https://raw.githubusercontent.com/EricEisaman/game-dev-1a/main/assets/images/skies/light-blue-sky-over-grassy-plain.png",
                 ROTATION_Y: 0,
@@ -609,8 +612,8 @@ export const ASSETS = {
             model: "https://raw.githubusercontent.com/EricEisaman/assets/main/environment/the_cave.glb",
             lightmap: "",
             scale: 6,
-            lightmappedMeshes: [] as readonly LightmappedMesh[],
-            physicsObjects: [] as readonly PhysicsObject[],
+            lightmappedMeshes: EMPTY_LIGHTMAPPED_MESHES,
+            physicsObjects: EMPTY_PHYSICS_OBJECTS,
             sky: {
                 TEXTURE_URL: "https://raw.githubusercontent.com/EricEisaman/game-dev-1a/main/assets/images/skies/light-blue-sky-over-grassy-plain.png",
                 ROTATION_Y: 0,

@@ -337,8 +337,8 @@ export class HUDManager {
             this.fpsLastTime = currentTime;
         }
 
-        const fpsValue = element.querySelector('#hud-fps-value') as HTMLElement;
-        if (fpsValue) {
+        const fpsValue = element.querySelector('#hud-fps-value');
+        if (fpsValue instanceof HTMLElement) {
             fpsValue.textContent = this.currentFPS.toString();
             fpsValue.style.color = this.currentFPS < 30 ? '#ff4444' : CONFIG.HUD.PRIMARY_COLOR;
         }
@@ -352,8 +352,8 @@ export class HUDManager {
         if (!element || !this.characterController) return;
 
         const state = this.characterController.getCurrentState();
-        const stateValue = element.querySelector('#hud-state-value') as HTMLElement;
-        if (stateValue) {
+        const stateValue = element.querySelector('#hud-state-value');
+        if (stateValue instanceof HTMLElement) {
             stateValue.textContent = state;
             stateValue.style.color = this.getStateColor(state);
         }
@@ -367,8 +367,8 @@ export class HUDManager {
         if (!element || !this.characterController) return;
 
         const isBoosting = this.characterController.isBoosting();
-        const boostValue = element.querySelector('#hud-boost-value') as HTMLElement;
-        if (boostValue) {
+        const boostValue = element.querySelector('#hud-boost-value');
+        if (boostValue instanceof HTMLElement) {
             if (isBoosting) {
                 boostValue.textContent = 'ACTIVE';
                 boostValue.style.color = '#44ff44';

@@ -187,52 +187,52 @@ export class CharacterController {
         }
     };
 
-    // Type guard functions for INPUT_KEYS
-    private isForwardKey = (k: string): k is typeof INPUT_KEYS.FORWARD[number] => {
+    // Key match helpers for INPUT_KEYS
+    private isForwardKey = (k: string): boolean => {
         return INPUT_KEYS.FORWARD.some(key => key === k);
     };
 
-    private isBackwardKey = (k: string): k is typeof INPUT_KEYS.BACKWARD[number] => {
+    private isBackwardKey = (k: string): boolean => {
         return INPUT_KEYS.BACKWARD.some(key => key === k);
     };
 
-    private isStrafeLeftKey = (k: string): k is typeof INPUT_KEYS.STRAFE_LEFT[number] => {
+    private isStrafeLeftKey = (k: string): boolean => {
         return INPUT_KEYS.STRAFE_LEFT.some(key => key === k);
     };
 
-    private isStrafeRightKey = (k: string): k is typeof INPUT_KEYS.STRAFE_RIGHT[number] => {
+    private isStrafeRightKey = (k: string): boolean => {
         return INPUT_KEYS.STRAFE_RIGHT.some(key => key === k);
     };
 
-    private isJumpKey = (k: string): k is typeof INPUT_KEYS.JUMP[number] => {
+    private isJumpKey = (k: string): boolean => {
         return INPUT_KEYS.JUMP.some(key => key === k);
     };
 
-    private isBoostKey = (k: string): k is typeof INPUT_KEYS.BOOST[number] => {
+    private isBoostKey = (k: string): boolean => {
         return INPUT_KEYS.BOOST.some(key => key === k);
     };
 
-    private isDebugKey = (k: string): k is typeof INPUT_KEYS.DEBUG[number] => {
+    private isDebugKey = (k: string): boolean => {
         return INPUT_KEYS.DEBUG.some(key => key === k);
     };
 
-    private isHUDToggleKey = (k: string): k is typeof INPUT_KEYS.HUD_TOGGLE[number] => {
+    private isHUDToggleKey = (k: string): boolean => {
         return INPUT_KEYS.HUD_TOGGLE.some(key => key === k);
     };
 
-    private isHUDPositionKey = (k: string): k is typeof INPUT_KEYS.HUD_POSITION[number] => {
+    private isHUDPositionKey = (k: string): boolean => {
         return INPUT_KEYS.HUD_POSITION.some(key => key === k);
     };
 
-    private isResetCameraKey = (k: string): k is typeof INPUT_KEYS.RESET_CAMERA[number] => {
+    private isResetCameraKey = (k: string): boolean => {
         return INPUT_KEYS.RESET_CAMERA.some(key => key === k);
     };
 
-    private isLeftKey = (k: string): k is typeof INPUT_KEYS.LEFT[number] => {
+    private isLeftKey = (k: string): boolean => {
         return INPUT_KEYS.LEFT.some(key => key === k);
     };
 
-    private isRightKey = (k: string): k is typeof INPUT_KEYS.RIGHT[number] => {
+    private isRightKey = (k: string): boolean => {
         return INPUT_KEYS.RIGHT.some(key => key === k);
     };
 

@@ -24,15 +24,17 @@ export function deserializePlayground(playgroundJson: unknown): PlaygroundData {
     }
 
     // Validate basic structure
-    if (!isRecord(playgroundJson)) {
+    if (typeof playgroundJson !== 'object' || playgroundJson === null) {
         throw new Error('Playground data must be a valid object');
     }
 
+    const playgroundRecord = playgroundJson as Record<string, unknown>;
+
     // Extract and decode main source code if base64 encoded
     const playgroundData: PlaygroundData = {
-        ...playgroundJson,
-        engine: typeof playgroundJson.engine === 'string' ? playgroundJson.engine : 'unknown',
-        version: typeof playgroundJson.version === 'number' ? playgroundJson.version : 0
+        ...playgroundRecord,
+        engine: typeof playgroundRecord.engine === 'string' ? playgroundRecord.engine : 'unknown',
+        version: typeof playgroundRecord.version === 'number' ? playgroundRecord.version : 0
     };
 
     // Check if there's a code property that's base64 encoded
@@ -63,7 +65,7 @@ export function deserializePlayground(playgroundJson: unknown): PlaygroundData {
     if (playgroundData.main && typeof playgroundData.main === 'string') {
         try {
             const parsedMain = JSON.parse(playgroundData.main);
-            if (isPlaygroundContent(parsedMain)) {
+            if (typeof parsedMain === 'object' && parsedMain !== null) {
                 playgroundData.playgroundContent = parsedMain;
             }
         } catch (e) {
@@ -86,14 +88,6 @@ function isBase64(str: string): boolean {
     } catch (err) {
         return false;
     }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null;
-}
-
-function isPlaygroundContent(value: unknown): value is PlaygroundContent {
-    return isRecord(value);
 }
 
 /**
@@ -153,7 +147,10 @@ export async function createSceneFromPlayground(
     // For now, we'll create a minimal scene that can be extended
     if (!scene.activeCamera) {
         const camera = new BABYLON.ArcRotateCamera('camera', -Math.PI / 2, Math.PI / 2, 20, new BABYLON.Vector3(0, 0, 0), scene);
-        camera.attachControl(engine.getRenderingCanvas() as HTMLCanvasElement, true);
+        const canvas = engine.getRenderingCanvas();
+        if (canvas instanceof HTMLCanvasElement) {
+            camera.attachControl(canvas, true);
+        }
     }
 
     // Add basic lighting

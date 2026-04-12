@@ -151,9 +151,12 @@ export class CollectiblesManager {
             } else {
                 // If no mesh with geometry found, use the first mesh as fallback
                 if (result.meshes.length > 0) {
-                    this.instanceBasis = result.meshes[0] as BABYLON.Mesh;
-                    this.instanceBasis.isVisible = false;
-                    this.instanceBasis.setEnabled(false);
+                    const fallbackMesh = result.meshes.find(mesh => mesh instanceof BABYLON.Mesh);
+                    if (fallbackMesh instanceof BABYLON.Mesh) {
+                        this.instanceBasis = fallbackMesh;
+                        this.instanceBasis.isVisible = false;
+                        this.instanceBasis.setEnabled(false);
+                    }
                 }
             }
         } catch (_error) {
@@ -367,9 +370,25 @@ export class CollectiblesManager {
         if (physicsAggregate && this.scene) {
             const physicsEngine = this.scene.getPhysicsEngine();
             if (physicsEngine) {
-                const havokPlugin = physicsEngine as unknown as BABYLON.HavokPlugin;
-                // Remove body from physics engine first
-                havokPlugin.removeBody(physicsAggregate.body);
+                const physicsEngineObj = physicsEngine as object;
+
+                // Prefer direct removeBody if the active engine exposes it.
+                const removeBodyCandidate = Reflect.get(physicsEngineObj, 'removeBody');
+                if (typeof removeBodyCandidate === 'function') {
+                    Reflect.apply(removeBodyCandidate, physicsEngineObj, [physicsAggregate.body]);
+                } else {
+                    // Fallback for engines that expose removeBody on the physics plugin.
+                    const getPhysicsPluginCandidate = Reflect.get(physicsEngineObj, 'getPhysicsPlugin');
+                    if (typeof getPhysicsPluginCandidate === 'function') {
+                        const plugin = Reflect.apply(getPhysicsPluginCandidate, physicsEngineObj, []);
+                        if (typeof plugin === 'object' && plugin !== null) {
+                            const pluginRemoveBody = Reflect.get(plugin, 'removeBody');
+                            if (typeof pluginRemoveBody === 'function') {
+                                Reflect.apply(pluginRemoveBody, plugin, [physicsAggregate.body]);
+                            }
+                        }
+                    }
+                }
             }
             // Dispose the physics aggregate to free resources
             physicsAggregate.dispose();

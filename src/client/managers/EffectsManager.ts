@@ -16,10 +16,12 @@
         listenerAutoUpdate?: boolean;
     };
 
-    type AudioListenerBridge = {
-        attach(node: BABYLON.Node): void;
-        detach(): void;
-    };
+    type AudioEngineFactory = (options?: AudioEngineInitOptions) => Promise<NonNullable<typeof globalThis.__babylonAudioEngine>>;
+    type CreateAbstractSoundAsync = (
+        name: string,
+        source: string,
+        options?: Record<string, unknown>
+    ) => Promise<BABYLON.AbstractSound>;
 
     /**
      * Result type for glow effect operations
@@ -56,6 +58,28 @@
             this.scene = scene;
         }
 
+        private static getCreateAudioEngineAsync(babylonBag: unknown): AudioEngineFactory | undefined {
+            if (typeof babylonBag !== 'object' || babylonBag === null) {
+                return undefined;
+            }
+
+            const candidate = Reflect.get(babylonBag, 'CreateAudioEngineAsync');
+            if (typeof candidate === 'function') {
+                return candidate as AudioEngineFactory;
+            }
+
+            return undefined;
+        }
+
+        private static getBabylonSoundFactory(name: 'CreateSoundAsync' | 'CreateStreamingSoundAsync'): CreateAbstractSoundAsync | undefined {
+            const candidate = Reflect.get(BABYLON as object, name);
+            if (typeof candidate === 'function') {
+                return candidate as CreateAbstractSoundAsync;
+            }
+
+            return undefined;
+        }
+
         private static getAudioEngine(): NonNullable<typeof globalThis.__babylonAudioEngine> | null {
             const g = globalThis as typeof globalThis & {
                 __babylonAudioEngine?: typeof globalThis.__babylonAudioEngine;
@@ -75,9 +99,7 @@
                 __babylonAudioEngine?: typeof globalThis.__babylonAudioEngine;
             };
 
-            const createAudioEngineAsync = g.BABYLON?.CreateAudioEngineAsync as unknown as
-                | ((options?: AudioEngineInitOptions) => Promise<NonNullable<typeof globalThis.__babylonAudioEngine>>)
-                | undefined;
+            const createAudioEngineAsync = this.getCreateAudioEngineAsync(g.BABYLON);
 
             if (typeof createAudioEngineAsync !== 'function') {
                 return null;
@@ -121,12 +143,20 @@
                 return;
             }
 
+            const listener = audioEngine.listener as object;
+
             if (listenerNode) {
-                (audioEngine.listener as unknown as AudioListenerBridge).attach(listenerNode);
+                const attachCandidate = Reflect.get(listener, 'attach');
+                if (typeof attachCandidate === 'function') {
+                    Reflect.apply(attachCandidate, listener, [listenerNode]);
+                }
                 return;
             }
 
-            (audioEngine.listener as unknown as AudioListenerBridge).detach();
+            const detachCandidate = Reflect.get(listener, 'detach');
+            if (typeof detachCandidate === 'function') {
+                Reflect.apply(detachCandidate, listener, []);
+            }
         }
 
         // Fades a sound's volume from -> to over ms; resolves when complete
@@ -170,13 +200,7 @@
                 this.backgroundMusic = null;
             }
 
-            const createStreamingSoundAsync = (BABYLON as unknown as {
-                CreateStreamingSoundAsync?: (
-                    name: string,
-                    source: string,
-                    options?: Record<string, unknown>
-                ) => Promise<BABYLON.AbstractSound>;
-            }).CreateStreamingSoundAsync;
+            const createStreamingSoundAsync = this.getBabylonSoundFactory('CreateStreamingSoundAsync');
 
             let bgm: ManagedStreamingSound;
             if (typeof createStreamingSoundAsync === 'function') {
@@ -219,13 +243,7 @@
 
             void this.ensureAudioReady();
 
-            const createSoundAsync = (BABYLON as unknown as {
-                CreateSoundAsync?: (
-                    name: string,
-                    source: string,
-                    options?: Record<string, unknown>
-                ) => Promise<BABYLON.AbstractSound>;
-            }).CreateSoundAsync;
+            const createSoundAsync = this.getBabylonSoundFactory('CreateSoundAsync');
 
             // Ensure previous are cleared first
             this.removeAmbientSounds();
@@ -605,13 +623,7 @@
             try {
                 void this.ensureAudioReady();
 
-                const createSoundAsync = (BABYLON as unknown as {
-                    CreateSoundAsync?: (
-                        name: string,
-                        source: string,
-                        options?: Record<string, unknown>
-                    ) => Promise<BABYLON.AbstractSound>;
-                }).CreateSoundAsync;
+                const createSoundAsync = this.getBabylonSoundFactory('CreateSoundAsync');
 
                 const sound = typeof createSoundAsync === 'function'
                     ? fromAbstractSound(await createSoundAsync(soundName, soundConfig.url, {

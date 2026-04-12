@@ -6,6 +6,10 @@ export class NodeMaterialManager {
     private static scene: BABYLON.Scene | null = null;
     private static activeNodeMaterials: Map<string, BABYLON.NodeMaterial> = new Map();
 
+    private static hasInitializedAnimatedInputs(nodeMaterial: BABYLON.NodeMaterial): boolean {
+        return Reflect.get(nodeMaterial, 'animatedInputs') !== null;
+    }
+
     /**
      * Initializes the NodeMaterialManager with a scene
      */
@@ -49,7 +53,7 @@ export class NodeMaterialManager {
                     // Guard: ensure internal state is fully initialized before use.
                     // animatedInputs being null indicates an incomplete build which would
                     // crash the render loop — force a rebuild to resolve it.
-                    if ((nodeMaterial as BABYLON.NodeMaterial & { animatedInputs: unknown }).animatedInputs === null) {
+                    if (!this.hasInitializedAnimatedInputs(nodeMaterial)) {
                         try {
                             nodeMaterial.build(false);
                         } catch {
@@ -58,7 +62,7 @@ export class NodeMaterialManager {
                     }
 
                     // Final safety check before caching
-                    if ((nodeMaterial as BABYLON.NodeMaterial & { animatedInputs: unknown }).animatedInputs === null) {
+                    if (!this.hasInitializedAnimatedInputs(nodeMaterial)) {
                         return; // Still not initialized — skip to avoid render-loop crash
                     }
 

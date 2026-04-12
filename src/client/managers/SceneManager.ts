@@ -444,6 +444,7 @@ export class SceneManager {
         if (!environment.lightmap) return;
         
         const lightmap = new BABYLON.Texture(environment.lightmap, this.scene);
+        lightmap.uAng = Math.PI;
 
         environment.lightmappedMeshes.forEach(lightmappedMesh => {
             const mesh = this.scene.getMeshByName(lightmappedMesh.name);
@@ -457,15 +458,11 @@ export class SceneManager {
                 if (mesh.material instanceof BABYLON.StandardMaterial) {
                     mesh.material.lightmapTexture = lightmap;
                     mesh.material.useLightmapAsShadowmap = true;
-                    // @ts-ignore
-                    (mesh.material.lightmapTexture as BABYLON.Texture).uAng = Math.PI;
                     mesh.material.lightmapTexture.level = lightmappedMesh.level;
                     mesh.material.lightmapTexture.coordinatesIndex = 1;
                 } else if (mesh.material instanceof BABYLON.PBRMaterial) {
                     mesh.material.lightmapTexture = lightmap;
                     mesh.material.useLightmapAsShadowmap = true;
-                    // @ts-ignore
-                    (mesh.material.lightmapTexture as BABYLON.Texture).uAng = Math.PI;
                     mesh.material.lightmapTexture.level = lightmappedMesh.level;
                     mesh.material.lightmapTexture.coordinatesIndex = 1;
                 }
