@@ -28,12 +28,6 @@ export class SettingsUI {
     private static pgSplitElement: HTMLElement | null = null;
     // Cache for HUD container original display style
     private static hudDisplayCache: string | null = null;
-    // Cache for embed element (Inspector)
-    private static embedElement: HTMLElement | null = null;
-    // Cache for embed element original display style
-    private static embedDisplayCache: string | null = null;
-    // Cache for embed element original visibility style
-    private static embedVisibilityCache: string | null = null;
     // Cache for Inspector button element
     private static inspectorButton: HTMLElement | null = null;
 
@@ -1631,12 +1625,6 @@ export class SettingsUI {
         this.pgSplitElement = null;
         // Clear HUD display cache
         this.hudDisplayCache = null;
-        // Clear embed element cache
-        this.embedElement = null;
-        // Clear embed display cache
-        this.embedDisplayCache = null;
-        // Clear embed visibility cache
-        this.embedVisibilityCache = null;
         // Clear Inspector button cache
         this.inspectorButton = null;
     }
