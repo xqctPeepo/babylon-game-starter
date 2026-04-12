@@ -5,8 +5,21 @@
     // /// <reference path="../types/babylon.d.ts" />
 
     import type { ParticleSnippet } from '../types/effects';
+    import { fromAbstractSound, fromLegacySound } from '../types/audio';
+    import type { ManagedAudioSound } from '../types/audio';
     import type { AmbientSoundConfig } from '../types/environment';
     import { CONFIG } from '../config/game-config';
+
+    type AudioEngineInitOptions = {
+        volume?: number;
+        listenerEnabled?: boolean;
+        listenerAutoUpdate?: boolean;
+    };
+
+    type AudioListenerBridge = {
+        attach(node: BABYLON.Node): void;
+        detach(): void;
+    };
 
     /**
      * Result type for glow effect operations
@@ -15,8 +28,8 @@
         | { success: true; material: null }
         | { success: false; error: string; details?: string };
 
-    type ManagedSound = BABYLON.AbstractSound;
-    type ManagedStreamingSound = BABYLON.AbstractSound;
+    type ManagedSound = ManagedAudioSound;
+    type ManagedStreamingSound = ManagedAudioSound;
 
     export class EffectsManager {
         private static activeParticleSystems: Map<string, BABYLON.IParticleSystem> = new Map();
@@ -43,15 +56,15 @@
             this.scene = scene;
         }
 
-        private static getAudioEngine(): BABYLON.AudioEngineV2 | null {
+        private static getAudioEngine(): NonNullable<typeof globalThis.__babylonAudioEngine> | null {
             const g = globalThis as typeof globalThis & {
-                __babylonAudioEngine?: BABYLON.AudioEngineV2;
+                __babylonAudioEngine?: typeof globalThis.__babylonAudioEngine;
             };
 
             return g.__babylonAudioEngine ?? null;
         }
 
-        private static async ensureAudioEngine(): Promise<BABYLON.AudioEngineV2 | null> {
+        private static async ensureAudioEngine(): Promise<NonNullable<typeof globalThis.__babylonAudioEngine> | null> {
             const existing = this.getAudioEngine();
             if (existing) {
                 return existing;
@@ -59,11 +72,11 @@
 
             const g = globalThis as typeof globalThis & {
                 BABYLON?: Record<string, unknown>;
-                __babylonAudioEngine?: BABYLON.AudioEngineV2;
+                __babylonAudioEngine?: typeof globalThis.__babylonAudioEngine;
             };
 
-            const createAudioEngineAsync = g.BABYLON?.CreateAudioEngineAsync as
-                | ((options?: Record<string, unknown>) => Promise<BABYLON.AudioEngineV2>)
+            const createAudioEngineAsync = g.BABYLON?.CreateAudioEngineAsync as unknown as
+                | ((options?: AudioEngineInitOptions) => Promise<NonNullable<typeof globalThis.__babylonAudioEngine>>)
                 | undefined;
 
             if (typeof createAudioEngineAsync !== 'function') {
@@ -76,7 +89,7 @@
                     listenerEnabled: true,
                     listenerAutoUpdate: true
                 });
-                g.__babylonAudioEngine = engine as any;
+                g.__babylonAudioEngine = engine;
                 return g.__babylonAudioEngine ?? null;
             } catch {
                 return null;
@@ -109,11 +122,11 @@
             }
 
             if (listenerNode) {
-                audioEngine.listener.attach(listenerNode);
+                (audioEngine.listener as unknown as AudioListenerBridge).attach(listenerNode);
                 return;
             }
 
-            audioEngine.listener.detach();
+            (audioEngine.listener as unknown as AudioListenerBridge).detach();
         }
 
         // Fades a sound's volume from -> to over ms; resolves when complete
@@ -150,7 +163,7 @@
             // Fade out and dispose existing
             if (this.backgroundMusic) {
                 try {
-                    await this.fade(this.backgroundMusic, this.backgroundMusic.volume, 0, fadeMs);
+                    await this.fade(this.backgroundMusic, this.backgroundMusic.getVolume(), 0, fadeMs);
                 } catch { /* no-op */ }
                 this.backgroundMusic.stop();
                 this.backgroundMusic.dispose();
@@ -165,18 +178,18 @@
                 ) => Promise<BABYLON.AbstractSound>;
             }).CreateStreamingSoundAsync;
 
-            let bgm: BABYLON.AbstractSound;
+            let bgm: ManagedStreamingSound;
             if (typeof createStreamingSoundAsync === 'function') {
-                bgm = await createStreamingSoundAsync("environment_bgm", url, {
+                bgm = fromAbstractSound(await createStreamingSoundAsync("environment_bgm", url, {
                     loop: true,
                     autoplay: false,
                     maxInstances: 1,
                     volume: 0
-                });
+                }));
             } else {
                 // Fallback for Playground runtimes without AudioV2 globals exposed.
                 bgm = await new Promise<ManagedStreamingSound>((resolve) => {
-                    const legacy = new BABYLON.Sound("environment_bgm", url, this.scene!, () => resolve(legacy as any), {
+                    const legacy = new BABYLON.Sound("environment_bgm", url, this.scene!, () => resolve(fromLegacySound(legacy)), {
                         loop: true,
                         autoplay: false,
                         volume: 0
@@ -192,7 +205,7 @@
         public static async stopAndDisposeBackgroundMusic(fadeMs: number = 1000): Promise<void> {
             if (!this.backgroundMusic) return;
             try {
-                await this.fade(this.backgroundMusic, this.backgroundMusic.volume, 0, fadeMs);
+                await this.fade(this.backgroundMusic, this.backgroundMusic.getVolume(), 0, fadeMs);
             } catch { /* no-op */ }
             this.backgroundMusic.stop();
             this.backgroundMusic.dispose();
@@ -219,7 +232,7 @@
             for (const [index, cfg] of configs.entries()) {
                 try {
                     const s = typeof createSoundAsync === 'function'
-                        ? await createSoundAsync(`ambient_${index}`, cfg.url, {
+                        ? fromAbstractSound(await createSoundAsync(`ambient_${index}`, cfg.url, {
                             loop: true,
                             autoplay: false,
                             maxInstances: 1,
@@ -228,9 +241,9 @@
                             spatialPosition: cfg.position.clone(),
                             spatialRolloffFactor: cfg.rollOff ?? 2,
                             spatialMaxDistance: cfg.maxDistance ?? 40
-                        })
+                        }))
                         : await new Promise<ManagedSound>((resolve) => {
-                            const legacy = new BABYLON.Sound(`ambient_${index}`, cfg.url, this.scene!, () => resolve(legacy as any), {
+                            const legacy = new BABYLON.Sound(`ambient_${index}`, cfg.url, this.scene!, () => resolve(fromLegacySound(legacy)), {
                                 loop: true,
                                 autoplay: false,
                                 volume: cfg.volume,
@@ -601,14 +614,14 @@
                 }).CreateSoundAsync;
 
                 const sound = typeof createSoundAsync === 'function'
-                    ? await createSoundAsync(soundName, soundConfig.url, {
+                    ? fromAbstractSound(await createSoundAsync(soundName, soundConfig.url, {
                         volume: soundConfig.volume,
                         loop: soundConfig.loop,
                         autoplay: false,
                         maxInstances: 1
-                    })
+                    }))
                     : await new Promise<ManagedSound>((resolve) => {
-                        const legacy = new BABYLON.Sound(soundName, soundConfig.url, this.scene!, () => resolve(legacy as any), {
+                        const legacy = new BABYLON.Sound(soundName, soundConfig.url, this.scene!, () => resolve(fromLegacySound(legacy)), {
                             volume: soundConfig.volume,
                             loop: soundConfig.loop,
                             autoplay: false
@@ -629,7 +642,7 @@
          */
         public static playSound(soundName: string): void {
             const sound = this.activeSounds.get(soundName);
-            if (sound && sound.activeInstancesCount === 0) {
+            if (sound && !sound.isActive()) {
                 sound.play();
             }
         }
@@ -640,7 +653,7 @@
          */
         public static stopSound(soundName: string): void {
             const sound = this.activeSounds.get(soundName);
-            if (sound && sound.activeInstancesCount > 0) {
+            if (sound && sound.isActive()) {
                 sound.stop();
             }
         }

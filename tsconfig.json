@@ -4,10 +4,11 @@
     "useDefineForClassFields": true,
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "allowUmdGlobalAccess": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
+    "rootDir": "./src",
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
@@ -17,12 +18,18 @@
     "noImplicitReturns": false,
     "strict": false,
     "forceConsistentCasingInFileNames": true,
-    "noImplicitAny": false,
+    "noImplicitAny": true,
     "strictNullChecks": false,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "types": ["babylonjs", "babylonjs-loaders", "babylonjs-materials"]
   },
-  "include": ["src"],
+  "include": [
+    "src/client/**/*.ts",
+    "src/client/**/*.d.ts",
+    "src/server/**/*.ts",
+    "src/server/**/*.d.ts"
+  ],
+  "exclude": ["dist"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

@@ -22,7 +22,7 @@ async function initializeRuntimeGlobals(): Promise<void> {
         BABYLON?: Record<string, unknown>;
         HavokPhysics?: () => Promise<unknown>;
         HK?: unknown;
-        __babylonAudioEngine?: BABYLON.AudioEngineV2;
+        __babylonAudioEngine?: typeof globalThis.__babylonAudioEngine;
     };
 
     // Ensure v2 physics APIs are available on global BABYLON (Playground-style access).
@@ -76,7 +76,7 @@ async function initializeRuntimeGlobals(): Promise<void> {
             listenerEnabled: true,
             listenerAutoUpdate: true
         });
-        g.__babylonAudioEngine = audioEngine as any;
+        g.__babylonAudioEngine = audioEngine;
     }
 }
 
@@ -195,7 +195,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 // Expose to window for debugging
-(window as any).__babylon = {
+window.__babylon = {
     BABYLON,
     engine: () => engine,
     scene: () => scene

@@ -13,6 +13,7 @@ import { ASSETS } from '../config/assets';
 import { AnimationController } from './AnimationController';
 import type { SmoothFollowCameraController } from './SmoothFollowCameraController';
 import { EffectsManager } from '../managers/EffectsManager';
+import type { ManagedAudioSound } from '../types/audio';
 
 import { MobileInputManager } from '../input/MobileInputManager';
 
@@ -32,7 +33,7 @@ export class CharacterController {
     private superJumpActive = false;
     private invisibilityActive = false;
     private playerParticleSystem: BABYLON.IParticleSystem | null = null;
-    private thrusterSound: BABYLON.AbstractSound | null = null;
+    private thrusterSound: ManagedAudioSound | null = null;
     public animationController: AnimationController;
 
     // Mobile device detection - computed once at initialization
@@ -237,32 +238,32 @@ export class CharacterController {
 
     private handleKeyDown(key: string): void {
         // Movement input
-        if (INPUT_KEYS.FORWARD.includes(key as any)) {
+        if (this.isForwardKey(key)) {
             this.inputDirection.z = 1;
 
-        } else if (INPUT_KEYS.BACKWARD.includes(key as any)) {
+        } else if (this.isBackwardKey(key)) {
             this.inputDirection.z = -1;
 
-        } else if (INPUT_KEYS.STRAFE_LEFT.includes(key as any)) {
+        } else if (this.isStrafeLeftKey(key)) {
             this.inputDirection.x = -1;
 
-        } else if (INPUT_KEYS.STRAFE_RIGHT.includes(key as any)) {
+        } else if (this.isStrafeRightKey(key)) {
             this.inputDirection.x = 1;
 
-        } else if (INPUT_KEYS.JUMP.includes(key as any)) {
+        } else if (this.isJumpKey(key)) {
             this.wantJump = true;
-        } else if (INPUT_KEYS.BOOST.includes(key as any)) {
+        } else if (this.isBoostKey(key)) {
             void EffectsManager.ensureAudioReady();
 
             this.boostActive = true;
             this.updateParticleSystem();
-        } else if (INPUT_KEYS.DEBUG.includes(key as any)) {
+        } else if (this.isDebugKey(key)) {
             this.toggleDebugDisplay();
-        } else if (INPUT_KEYS.HUD_TOGGLE.includes(key as any)) {
+        } else if (this.isHUDToggleKey(key)) {
             this.toggleHUD();
-        } else if (INPUT_KEYS.HUD_POSITION.includes(key as any)) {
+        } else if (this.isHUDPositionKey(key)) {
             this.cycleHUDPosition();
-        } else if (INPUT_KEYS.RESET_CAMERA.includes(key as any)) {
+        } else if (this.isResetCameraKey(key)) {
             this.resetCameraToDefaultOffset();
         }
 
@@ -274,19 +275,19 @@ export class CharacterController {
 
     private handleKeyUp(key: string): void {
         // Reset movement input
-        if (INPUT_KEYS.FORWARD.includes(key as any) || INPUT_KEYS.BACKWARD.includes(key as any)) {
+        if (this.isForwardKey(key) || this.isBackwardKey(key)) {
             this.inputDirection.z = 0;
         }
-        if (INPUT_KEYS.LEFT.includes(key as any) || INPUT_KEYS.RIGHT.includes(key as any)) {
+        if (this.isLeftKey(key) || this.isRightKey(key)) {
             this.inputDirection.x = 0;
         }
-        if (INPUT_KEYS.STRAFE_LEFT.includes(key as any) || INPUT_KEYS.STRAFE_RIGHT.includes(key as any)) {
+        if (this.isStrafeLeftKey(key) || this.isStrafeRightKey(key)) {
             this.inputDirection.x = 0;
         }
-        if (INPUT_KEYS.JUMP.includes(key as any)) {
+        if (this.isJumpKey(key)) {
             this.wantJump = false;
         }
-        if (INPUT_KEYS.BOOST.includes(key as any)) {
+        if (this.isBoostKey(key)) {
             this.boostActive = false;
             this.updateParticleSystem();
         }
@@ -406,11 +407,11 @@ export class CharacterController {
         // Update thruster sound
         if (this.thrusterSound) {
             if (this.boostActive) {
-                if (this.thrusterSound.activeInstancesCount === 0) {
+                if (!this.thrusterSound.isActive()) {
                     this.thrusterSound.play();
                 }
             } else {
-                if (this.thrusterSound.activeInstancesCount > 0) {
+                if (this.thrusterSound.isActive()) {
                     this.thrusterSound.stop();
                 }
             }
@@ -810,13 +811,13 @@ export class CharacterController {
         return this.playerParticleSystem;
     }
 
-    public setThrusterSound(sound: BABYLON.AbstractSound): void {
+    public setThrusterSound(sound: ManagedAudioSound): void {
         this.thrusterSound = sound;
         // Start with sound stopped
         sound.stop();
 
         // If boost was already active before sound assignment/load, start immediately.
-        if (this.boostActive && sound.activeInstancesCount === 0) {
+        if (this.boostActive && !sound.isActive()) {
             sound.play();
         }
     }
@@ -892,9 +893,9 @@ export class CharacterController {
         allMeshes.forEach(mesh => {
             if (mesh.material) {
                 if (this.invisibilityActive) {
-                    (mesh.material as any).alpha = 0.25;
+                    mesh.material.alpha = 0.25;
                 } else {
-                    (mesh.material as any).alpha = 1.0;
+                    mesh.material.alpha = 1.0;
                 }
             }
         });

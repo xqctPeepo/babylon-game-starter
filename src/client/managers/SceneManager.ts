@@ -662,8 +662,8 @@ export class SceneManager {
 
         itemMeshes.forEach(mesh => {
             // Dispose physics body if it exists
-            if ((mesh as any).physicsImpostor) {
-                (mesh as any).physicsImpostor.dispose();
+            if (mesh.physicsImpostor) {
+                mesh.physicsImpostor.dispose();
             }
             mesh.dispose();
         });

@@ -33,4 +33,8 @@ export class CameraManager {
     }
 }
 
-(window as any).CameraManager = CameraManager;
+const globalWithCameraManager = globalThis as typeof globalThis & {
+    CameraManager?: typeof CameraManager;
+};
+
+globalWithCameraManager.CameraManager = CameraManager;

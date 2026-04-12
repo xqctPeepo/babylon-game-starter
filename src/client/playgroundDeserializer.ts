@@ -4,12 +4,7 @@
  */
 
 import * as BABYLON from '@babylonjs/core';
-
-export interface PlaygroundData {
-    engine: string;
-    version: number;
-    [key: string]: any;
-}
+import type { PlaygroundContent, PlaygroundData } from './types/playground';
 
 /**
  * Deserializes playground.json file data
@@ -17,7 +12,7 @@ export interface PlaygroundData {
  * @param playgroundJson - The raw playground.json as string or object
  * @returns Deserialized playground data
  */
-export function deserializePlayground(playgroundJson: any): PlaygroundData {
+export function deserializePlayground(playgroundJson: unknown): PlaygroundData {
     // If it's a string, parse it as JSON
     if (typeof playgroundJson === 'string') {
         try {
@@ -29,12 +24,16 @@ export function deserializePlayground(playgroundJson: any): PlaygroundData {
     }
 
     // Validate basic structure
-    if (!playgroundJson || typeof playgroundJson !== 'object') {
+    if (!isRecord(playgroundJson)) {
         throw new Error('Playground data must be a valid object');
     }
 
     // Extract and decode main source code if base64 encoded
-    let playgroundData: PlaygroundData = { ...playgroundJson };
+    const playgroundData: PlaygroundData = {
+        ...playgroundJson,
+        engine: typeof playgroundJson.engine === 'string' ? playgroundJson.engine : 'unknown',
+        version: typeof playgroundJson.version === 'number' ? playgroundJson.version : 0
+    };
 
     // Check if there's a code property that's base64 encoded
     if (playgroundData.code && typeof playgroundData.code === 'string') {
@@ -64,7 +63,9 @@ export function deserializePlayground(playgroundJson: any): PlaygroundData {
     if (playgroundData.main && typeof playgroundData.main === 'string') {
         try {
             const parsedMain = JSON.parse(playgroundData.main);
-            playgroundData.playgroundContent = parsedMain;
+            if (isPlaygroundContent(parsedMain)) {
+                playgroundData.playgroundContent = parsedMain;
+            }
         } catch (e) {
             // Main might be raw code, not JSON
             console.warn('Main is not JSON, treating as raw code');
@@ -85,6 +86,14 @@ function isBase64(str: string): boolean {
     } catch (err) {
         return false;
     }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
+}
+
+function isPlaygroundContent(value: unknown): value is PlaygroundContent {
+    return isRecord(value);
 }
 
 /**
