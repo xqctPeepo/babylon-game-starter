@@ -473,6 +473,9 @@ export const ASSETS = {
       },
       spawnPoint: new BABYLON.Vector3(3, 0, 31),
       spawnRotation: new BABYLON.Vector3(0, 0, 0),
+      fallRespawn: {
+        onRespawnedHandlerId: 'dystopiaStripCreditsOnFallRespawn'
+      },
       particles: [
         {
           name: 'Magic Sparkles',
