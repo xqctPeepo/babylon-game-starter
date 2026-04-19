@@ -20,6 +20,8 @@ export class HUDManager {
   private static fpsLastTime = 0;
   private static currentFPS = 0;
   private static lastCoordinates: BABYLON.Vector3 | null = null;
+  /** Throttles DOM-heavy HUD fields (coordinates, time, state, boost, credits); FPS still samples every frame. */
+  private static lastHudHeavyUpdate = 0;
   private static isMobile = false;
   private static isIPadWithKeyboard = false;
   private static activeHudConfig: {
@@ -251,9 +253,18 @@ export class HUDManager {
   private static updateHUD(): void {
     if (!this.scene || !this.characterController) return;
 
+    const now = performance.now();
+    const throttleMs = CONFIG.HUD.UPDATE_INTERVAL;
+    const doHeavyDom = now - this.lastHudHeavyUpdate >= throttleMs;
+    if (doHeavyDom) {
+      this.lastHudHeavyUpdate = now;
+    }
+
     // Update coordinates
     if (this.activeHudConfig.SHOW_COORDINATES) {
-      this.updateCoordinates();
+      if (doHeavyDom) {
+        this.updateCoordinates();
+      }
       this.setElementVisibility('coordinates', true);
     } else {
       this.setElementVisibility('coordinates', false);
@@ -261,13 +272,15 @@ export class HUDManager {
 
     // Update time
     if (this.activeHudConfig.SHOW_TIME) {
-      this.updateTime();
+      if (doHeavyDom) {
+        this.updateTime();
+      }
       this.setElementVisibility('time', true);
     } else {
       this.setElementVisibility('time', false);
     }
 
-    // Update FPS
+    // Update FPS (counter must run every frame; text updates inside updateFPS stay cheap)
     if (this.activeHudConfig.SHOW_FPS) {
       this.updateFPS();
       this.setElementVisibility('fps', true);
@@ -277,7 +290,9 @@ export class HUDManager {
 
     // Update state
     if (this.activeHudConfig.SHOW_STATE) {
-      this.updateState();
+      if (doHeavyDom) {
+        this.updateState();
+      }
       this.setElementVisibility('state', true);
     } else {
       this.setElementVisibility('state', false);
@@ -285,7 +300,9 @@ export class HUDManager {
 
     // Update boost status
     if (this.activeHudConfig.SHOW_BOOST_STATUS) {
-      this.updateBoostStatus();
+      if (doHeavyDom) {
+        this.updateBoostStatus();
+      }
       this.setElementVisibility('boost', true);
     } else {
       this.setElementVisibility('boost', false);
@@ -293,7 +310,9 @@ export class HUDManager {
 
     // Update credits
     if (this.activeHudConfig.SHOW_CREDITS) {
-      this.updateCredits();
+      if (doHeavyDom) {
+        this.updateCredits();
+      }
       this.setElementVisibility('credits', true);
     } else {
       this.setElementVisibility('credits', false);

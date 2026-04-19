@@ -4,11 +4,27 @@
 
 // /// <reference path="../types/babylon.d.ts" />
 
+import {
+  HardwareScalingOptimization,
+  SceneOptimizer,
+  SceneOptimizerOptions
+} from '@babylonjs/core/Misc/sceneOptimizer';
+import { ScenePerformancePriority } from '@babylonjs/core/scene';
+
 import { ASSETS } from '../config/assets';
 import { CONFIG } from '../config/game_config';
 import { CharacterController } from '../controllers/character_controller';
 import { SmoothFollowCameraController } from '../controllers/smooth_follow_camera_controller';
 import { OBJECT_ROLE } from '../types/environment';
+import { devLog, isViteDev } from '../utils/dev_log';
+import {
+  registerDeferredScenePerfDevLogFlush,
+  stampScenePerfConsoleContext
+} from '../utils/scene_perf_console_stamp';
+import {
+  collectScenePerformanceStats,
+  formatScenePerformanceStats
+} from '../utils/scene_performance_stats';
 
 import { AudioManager } from './audio_manager';
 import { BehaviorManager } from './behavior_manager';
@@ -47,10 +63,23 @@ export class SceneManager {
   // Default light tracking
   private defaultLight: BABYLON.HemisphericLight | null = null;
 
+  private sceneOptimizer: InstanceType<typeof SceneOptimizer> | null = null;
+  private sceneOptimizerStarted = false;
+
+  /** When true, dev [ScenePerf] was skipped until CharacterLoader sets a playable character. */
+  private scenePerfDevLogDeferred = false;
+
   constructor(engine: BABYLON.Engine, canvas: HTMLCanvasElement) {
     void canvas;
     this.scene = new BABYLON.Scene(engine);
     this.camera = new BABYLON.TargetCamera('camera1', CONFIG.CAMERA.START_POSITION, this.scene);
+    this.camera.maxZ = CONFIG.PERFORMANCE.CAMERA_MAX_Z;
+    // WebGPU: Intermediate + dirty blocking / frozen materials can break light UBO bind groups; stay conservative.
+    const webgpu = engine.constructor.name === 'WebGPUEngine';
+    this.scene.performancePriority = webgpu
+      ? ScenePerformancePriority.BackwardCompatible
+      : ScenePerformancePriority.Intermediate;
+    this.scene.constantlyUpdateMeshUnderPointer = false;
 
     void this.initializeScene();
   }
@@ -109,6 +138,9 @@ export class SceneManager {
 
     // Initialize CharacterLoader with scene and character controller
     CharacterLoader.initialize(this.scene, this.characterController);
+    registerDeferredScenePerfDevLogFlush((s) => {
+      this.flushDeferredScenePerfDevLog(s);
+    });
 
     this.smoothFollowController = new SmoothFollowCameraController(
       this.scene,
@@ -323,6 +355,8 @@ export class SceneManager {
       // Set up environment items for the new environment
       await this.setupEnvironmentItems();
 
+      this.applyPostLoadPerformanceTuning();
+
       // Re-enable character after environment switch is complete
       if (this.characterController) {
         this.characterController.resumePhysics();
@@ -359,6 +393,85 @@ export class SceneManager {
           playerMesh.setEnabled(true);
         }
       }
+    }
+  }
+
+  private flushDeferredScenePerfDevLog(scene: BABYLON.Scene): void {
+    if (scene !== this.scene || !this.scenePerfDevLogDeferred) {
+      return;
+    }
+    const characterName = CharacterLoader.getCurrentCharacterName();
+    if (!characterName) {
+      return;
+    }
+    this.scenePerfDevLogDeferred = false;
+    const loggedAtIso = new Date().toISOString();
+    stampScenePerfConsoleContext(this.scene, {
+      environmentName: this.currentEnvironment,
+      characterName,
+      loggedAtIso
+    });
+    devLog(
+      formatScenePerformanceStats(
+        collectScenePerformanceStats(this.scene, {
+          environmentName: this.currentEnvironment,
+          characterName,
+          loggedAtIso
+        })
+      )
+    );
+  }
+
+  private applyPostLoadPerformanceTuning(): void {
+    const webgpu = this.scene.getEngine().constructor.name === 'WebGPUEngine';
+
+    if (!this.sceneOptimizerStarted && CONFIG.PERFORMANCE.SCENE_OPTIMIZER_ENABLED && !webgpu) {
+      this.sceneOptimizerStarted = true;
+      this.sceneOptimizer?.stop();
+      this.sceneOptimizer?.dispose();
+      const perf = CONFIG.PERFORMANCE;
+      const opts = new SceneOptimizerOptions(
+        perf.SCENE_OPTIMIZER_TARGET_FPS,
+        perf.SCENE_OPTIMIZER_TRACK_MS
+      );
+      opts.addOptimization(
+        new HardwareScalingOptimization(0, perf.HARDWARE_SCALING_MAX, perf.HARDWARE_SCALING_STEP)
+      );
+      // Playground typings do not expose a stable `Scene` import; runtime `BABYLON.Scene` matches `SceneOptimizer`.
+      this.sceneOptimizer = SceneOptimizer.OptimizeAsync(
+        this.scene as unknown as Parameters<typeof SceneOptimizer.OptimizeAsync>[0],
+        opts
+      );
+    }
+
+    if (isViteDev()) {
+      const loggedAtIso = new Date().toISOString();
+      const characterName = CharacterLoader.getCurrentCharacterName();
+      if (!characterName) {
+        // Initial boot: index.ts loads the environment first, then loadCharacterModel. Defer
+        // [ScenePerf] until CharacterLoader stamps a name so the console never shows character="(none)".
+        this.scenePerfDevLogDeferred = true;
+        stampScenePerfConsoleContext(this.scene, {
+          environmentName: this.currentEnvironment,
+          loggedAtIso
+        });
+        return;
+      }
+      this.scenePerfDevLogDeferred = false;
+      stampScenePerfConsoleContext(this.scene, {
+        environmentName: this.currentEnvironment,
+        characterName,
+        loggedAtIso
+      });
+      devLog(
+        formatScenePerformanceStats(
+          collectScenePerformanceStats(this.scene, {
+            environmentName: this.currentEnvironment,
+            characterName,
+            loggedAtIso
+          })
+        )
+      );
     }
   }
 
@@ -402,9 +515,24 @@ export class SceneManager {
         }
       }
 
-      mesh.freezeWorldMatrix();
-      mesh.doNotSyncBoundingInfo = true;
+      this.optimizeStaticEnvironmentMesh(mesh);
     });
+  }
+
+  /**
+   * Freezes world matrix / bounding sync for static environment geometry.
+   * Do not call material.freeze() here: lights and scene uniforms must keep updating (WebGPU bind groups).
+   * Skips skinned meshes.
+   */
+  private optimizeStaticEnvironmentMesh(mesh: BABYLON.AbstractMesh): void {
+    if (!(mesh instanceof BABYLON.Mesh)) {
+      return;
+    }
+    if (mesh.skeleton != null) {
+      return;
+    }
+    mesh.freezeWorldMatrix();
+    mesh.doNotSyncBoundingInfo = true;
   }
 
   private setupPhysicsObjects(environment: Environment): void {
@@ -434,6 +562,10 @@ export class SceneManager {
         // Register behavior if specified
         if (physicsObject.behavior) {
           BehaviorManager.registerInstance(physicsObject.name, mesh, physicsObject.behavior);
+        }
+
+        if (physicsObject.mass === 0) {
+          this.optimizeStaticEnvironmentMesh(mesh);
         }
       }
     });
@@ -536,6 +668,7 @@ export class SceneManager {
           friction: 0.9
         });
         mesh.isPickable = false;
+        this.optimizeStaticEnvironmentMesh(mesh);
       }
     });
   }
@@ -823,6 +956,10 @@ export class SceneManager {
   }
 
   public dispose(): void {
+    this.sceneOptimizer?.stop();
+    this.sceneOptimizer?.dispose();
+    this.sceneOptimizer = null;
+
     if (this.characterController) {
       this.characterController.dispose();
     }
