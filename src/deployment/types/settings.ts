@@ -36,10 +36,9 @@ export interface StaticDeploymentConfig {
   basePath?: `/${string}`;
 }
 
-export type HostTypeCompatibility<H extends DeploymentHost> =
-  H extends 'github.io' | 'netlify'
-    ? { type: 'static' }
-    : { type: DeploymentType };
+export type HostTypeCompatibility<H extends DeploymentHost> = H extends 'github.io' | 'netlify'
+  ? { type: 'static' }
+  : { type: DeploymentType };
 
 export type DeploymentSettings<H extends DeploymentHost = DeploymentHost> = {
   host: H;
