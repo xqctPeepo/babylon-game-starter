@@ -1,5 +1,7 @@
 # Resources
 
+Project documentation: [README.md](../README.md), [USERS_GUIDE.md](../USERS_GUIDE.md), [STYLE.md](../STYLE.md), [src/deployment/DEPLOYMENT.md](../src/deployment/DEPLOYMENT.md).
+
 ## Babylon.js
 
 - [Babylon.js Documentation](https://doc.babylonjs.com/)
