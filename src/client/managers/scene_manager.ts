@@ -25,6 +25,7 @@ import {
   collectScenePerformanceStats,
   formatScenePerformanceStats
 } from '../utils/scene_performance_stats';
+import { switchToEnvironment } from '../utils/switch_environment';
 
 import { AudioManager } from './audio_manager';
 import { BehaviorManager } from './behavior_manager';
@@ -166,6 +167,12 @@ export class SceneManager {
     // Initialize BehaviorManager after character is set up
     if (this.characterController) {
       BehaviorManager.initialize(this.scene, this.characterController);
+      BehaviorManager.setFallRespawnHandlers({
+        resetToSpawn: () => {
+          this.resetToStartPosition();
+        },
+        switchEnvironment: switchToEnvironment
+      });
     }
 
     // Force activate smooth follow camera
@@ -249,6 +256,8 @@ export class SceneManager {
   }
 
   public async loadEnvironment(environmentName: string): Promise<void> {
+    BehaviorManager.unregisterFallOutOfWorld();
+
     // Find the environment by name
     const environment = ASSETS.ENVIRONMENTS.find((env) => env.name === environmentName);
     if (!environment) {
@@ -408,6 +417,8 @@ export class SceneManager {
 
       // Set up environment items for the new environment
       await this.setupEnvironmentItems();
+
+      BehaviorManager.registerFallOutOfWorldForEnvironment(environment);
 
       this.applyPostLoadPerformanceTuning();
 
@@ -759,6 +770,7 @@ export class SceneManager {
   }
 
   public clearEnvironment(): void {
+    BehaviorManager.unregisterFallOutOfWorld();
     this.discardEnvironmentHiddenTracking();
 
     // Clear all environment-related meshes
@@ -1015,6 +1027,7 @@ export class SceneManager {
     }
 
     CameraManager.dispose();
+    BehaviorManager.dispose();
 
     // Dispose cached character meshes via CharacterLoader
     CharacterLoader.pruneCache(0); // Clear all cached characters

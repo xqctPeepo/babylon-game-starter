@@ -5,6 +5,11 @@
 import { switchToEnvironment } from '../utils/switch_environment';
 
 import { CollectiblesManager } from './collectibles_manager';
+import {
+  registerFallRespawnHandler,
+  runFallRespawnHandler,
+  runGlobalOnFellOffMapHook
+} from './fall_respawn_hooks';
 import { VisualEffectsManager } from './visual_effects_manager';
 
 import type { CharacterController } from '../controllers/character_controller';
@@ -12,8 +17,19 @@ import type {
   BehaviorConfig,
   CheckPeriod,
   ProximityTriggerConfig,
-  BehaviorAction
+  BehaviorAction,
+  FallOutOfWorldTriggerConfig
 } from '../types/behaviors';
+import type { Environment } from '../types/environment';
+
+const FALL_OUT_OF_WORLD_INSTANCE_ID = '__fall_out_of_world__';
+const FALL_RECOVER_Y_MARGIN = 5;
+const DEFAULT_FALL_DEPTH_BELOW_SPAWN = 100;
+
+export interface FallRespawnHandlers {
+  readonly resetToSpawn: () => void;
+  readonly switchEnvironment: (name: string) => Promise<void>;
+}
 
 /**
  * Internal tracking structure for behavior instances
@@ -31,6 +47,9 @@ interface BehaviorInstance {
   lastProximityEvaluationTime: number;
   /** Cached trigger result aligned with lastProximityEvaluationTime window. */
   cachedProximityTriggerResult: boolean;
+  /** Fall trigger: when true, the next OOB may fire a respawn. */
+  fallMayTrigger?: boolean;
+  fallRespawnInProgress?: boolean;
 }
 
 export class BehaviorManager {
@@ -38,6 +57,14 @@ export class BehaviorManager {
   private static characterController: CharacterController | null = null;
   private static instances = new Map<string, BehaviorInstance>();
   private static updateObserver: BABYLON.Observer<BABYLON.Scene> | null = null;
+  private static fallHandlers: FallRespawnHandlers | null = null;
+
+  /**
+   * Scene callbacks for fall respawn (avoids importing SceneManager).
+   */
+  public static setFallRespawnHandlers(handlers: FallRespawnHandlers | null): void {
+    this.fallHandlers = handlers;
+  }
 
   /**
    * Initializes the BehaviorManager with a scene and character controller
@@ -46,7 +73,52 @@ export class BehaviorManager {
     this.scene = scene;
     this.characterController = characterController;
     this.instances.clear();
+    registerFallRespawnHandler('dystopiaStripCreditsOnFallRespawn', () => {
+      const total = CollectiblesManager.getTotalCredits();
+      if (total > 0) {
+        CollectiblesManager.adjustCredits(-total);
+      }
+    });
     this.startUpdateLoop();
+  }
+
+  /**
+   * Registers fall-out-of-world monitoring for the loaded environment (no mesh).
+   * `minSafeY` defaults to spawn Y minus {@link DEFAULT_FALL_DEPTH_BELOW_SPAWN} when omitted in assets.
+   */
+  public static registerFallOutOfWorldForEnvironment(environment: Environment): void {
+    if (!this.scene) {
+      return;
+    }
+
+    const fr = environment.fallRespawn;
+    const minSafeY = fr?.minSafeY ?? environment.spawnPoint.y - DEFAULT_FALL_DEPTH_BELOW_SPAWN;
+    const fullConfig: FallOutOfWorldTriggerConfig = {
+      triggerKind: 'fallOutOfWorld',
+      ...(fr ?? {}),
+      minSafeY
+    };
+
+    const instance: BehaviorInstance = {
+      identifier: FALL_OUT_OF_WORLD_INSTANCE_ID,
+      mesh: null,
+      particleSystem: null,
+      position: null,
+      config: fullConfig,
+      behaviorActive: false,
+      lastCheckTime: Date.now(),
+      lastActionTime: 0,
+      lastProximityEvaluationTime: 0,
+      cachedProximityTriggerResult: false,
+      fallMayTrigger: true,
+      fallRespawnInProgress: false
+    };
+
+    this.instances.set(FALL_OUT_OF_WORLD_INSTANCE_ID, instance);
+  }
+
+  public static unregisterFallOutOfWorld(): void {
+    this.unregisterInstance(FALL_OUT_OF_WORLD_INSTANCE_ID);
   }
 
   /**
@@ -108,6 +180,7 @@ export class BehaviorManager {
     this.instances.clear();
     this.scene = null;
     this.characterController = null;
+    this.fallHandlers = null;
   }
 
   /**
@@ -144,8 +217,13 @@ export class BehaviorManager {
     const currentTime = Date.now();
 
     this.instances.forEach((instance) => {
+      if (instance.config.triggerKind === 'fallOutOfWorld') {
+        this.updateFallOutOfWorld(instance);
+        return;
+      }
+
       // Always check trigger every frame to detect enter/leave proximity
-      const triggerResult = this.evaluateTrigger(instance);
+      const triggerResult = this.evaluateProximityTrigger(instance);
 
       if (triggerResult && !instance.behaviorActive) {
         // Entering proximity - apply effects and execute action immediately
@@ -166,19 +244,112 @@ export class BehaviorManager {
     });
   }
 
+  private static updateFallOutOfWorld(instance: BehaviorInstance): void {
+    if (!this.characterController) {
+      return;
+    }
+
+    const config = instance.config as FallOutOfWorldTriggerConfig;
+    const checkPeriod = this.getCheckPeriod(config);
+    const now = Date.now();
+    let oob: boolean;
+    if (checkPeriod.type === 'interval') {
+      if (now - instance.lastProximityEvaluationTime < checkPeriod.milliseconds) {
+        oob = instance.cachedProximityTriggerResult;
+      } else {
+        instance.lastProximityEvaluationTime = now;
+        oob = this.computeOutOfBounds(this.characterController.getPosition(), config);
+        instance.cachedProximityTriggerResult = oob;
+      }
+    } else {
+      oob = this.computeOutOfBounds(this.characterController.getPosition(), config);
+    }
+
+    const recoverY = config.recoverSafeY ?? config.minSafeY + FALL_RECOVER_Y_MARGIN;
+    const pos = this.characterController.getPosition();
+
+    const mayTrigger = instance.fallMayTrigger !== false;
+    if (!mayTrigger) {
+      if (pos.y >= recoverY) {
+        instance.fallMayTrigger = true;
+      }
+      return;
+    }
+
+    if (oob && !instance.fallRespawnInProgress) {
+      if (!this.fallHandlers) {
+        return;
+      }
+      void this.executeFallRespawn(instance).catch((err: unknown) => {
+        console.error('[BehaviorManager] fall respawn failed:', err);
+      });
+    }
+  }
+
+  private static computeOutOfBounds(
+    pos: BABYLON.Vector3,
+    config: FallOutOfWorldTriggerConfig
+  ): boolean {
+    if (pos.y < config.minSafeY) {
+      return true;
+    }
+    const b = config.bounds;
+    if (!b) {
+      return false;
+    }
+    if (b.maxSafeY !== undefined && pos.y > b.maxSafeY) {
+      return true;
+    }
+    if (b.minX !== undefined && pos.x < b.minX) {
+      return true;
+    }
+    if (b.maxX !== undefined && pos.x > b.maxX) {
+      return true;
+    }
+    if (b.minZ !== undefined && pos.z < b.minZ) {
+      return true;
+    }
+    if (b.maxZ !== undefined && pos.z > b.maxZ) {
+      return true;
+    }
+    return false;
+  }
+
+  private static async executeFallRespawn(instance: BehaviorInstance): Promise<void> {
+    const handlers = this.fallHandlers;
+    if (!handlers || instance.fallRespawnInProgress) {
+      return;
+    }
+
+    if (instance.config.triggerKind !== 'fallOutOfWorld') {
+      return;
+    }
+    const config = instance.config;
+    instance.fallRespawnInProgress = true;
+    instance.fallMayTrigger = false;
+
+    try {
+      const targetEnv = config.respawnEnvironmentName;
+      if (targetEnv !== undefined && targetEnv.length > 0) {
+        await handlers.switchEnvironment(targetEnv);
+      } else {
+        handlers.resetToSpawn();
+      }
+      await runGlobalOnFellOffMapHook();
+      await runFallRespawnHandler(config.onRespawnedHandlerId);
+    } finally {
+      instance.fallRespawnInProgress = false;
+    }
+  }
+
   /**
    * Gets the check period for a behavior config, defaulting to "everyFrame"
    */
   private static getCheckPeriod(config: BehaviorConfig): CheckPeriod {
-    const proximityConfig: ProximityTriggerConfig = config;
-    return proximityConfig.checkPeriod ?? { type: 'everyFrame' };
-  }
-
-  /**
-   * Evaluates the trigger condition for an instance
-   */
-  private static evaluateTrigger(instance: BehaviorInstance): boolean {
-    return this.evaluateProximityTrigger(instance);
+    if (config.triggerKind === 'fallOutOfWorld') {
+      return config.checkPeriod ?? { type: 'everyFrame' };
+    }
+    return config.checkPeriod ?? { type: 'everyFrame' };
   }
 
   /**
@@ -189,7 +360,7 @@ export class BehaviorManager {
       return false;
     }
 
-    const config: ProximityTriggerConfig = instance.config;
+    const config: ProximityTriggerConfig = instance.config as ProximityTriggerConfig;
     const checkPeriod = this.getCheckPeriod(config);
     const now = Date.now();
     if (checkPeriod.type === 'interval') {
@@ -234,7 +405,7 @@ export class BehaviorManager {
    * Applies visual effects to an instance (called once when entering proximity)
    */
   private static applyEffects(instance: BehaviorInstance): void {
-    const config: ProximityTriggerConfig = instance.config;
+    const config: ProximityTriggerConfig = instance.config as ProximityTriggerConfig;
 
     // Apply glow behavior if mesh is available
     if (instance.mesh) {
@@ -263,7 +434,7 @@ export class BehaviorManager {
     currentTime: number,
     forceImmediate: boolean
   ): void {
-    const config: ProximityTriggerConfig = instance.config;
+    const config: ProximityTriggerConfig = instance.config as ProximityTriggerConfig;
     if (!config.action) {
       return;
     }

@@ -2,7 +2,7 @@
 // ENVIRONMENT TYPE DEFINITIONS
 // ============================================================================
 
-import type { BehaviorConfig } from './behaviors';
+import type { BehaviorConfig, FallRespawnConfig } from './behaviors';
 import type { ItemEffectKind } from './config';
 import type { EffectType } from './effects';
 
@@ -152,6 +152,11 @@ export interface Environment {
   readonly lights?: readonly LightConfig[]; // Optional environment-specific lights
   readonly cameraOffset?: BABYLON.Vector3; // Optional camera offset for this environment
   readonly cutScene?: CutScene; // Optional cutscene to play when switching to this environment
+  /**
+   * Optional fall-off-map tuning and per-environment `onRespawnedHandlerId`. Fall respawn to this
+   * env’s spawn (or cross-env when configured) is always active without this block.
+   */
+  readonly fallRespawn?: FallRespawnConfig;
 }
 
 // Forward declarations for circular dependencies
