@@ -804,94 +804,142 @@ export class SettingsUI {
     return this.lastSelectedEnvironmentName;
   }
 
+  /**
+   * Performs pause/clear/load/reposition/camera unlock after optional cutscene handling.
+   */
+  private static async runEnvironmentSwitchAfterCutscene(
+    environmentName: string,
+    previousEnvironmentName: string
+  ): Promise<void> {
+    if (!this.sceneManager) {
+      return;
+    }
+
+    if (environmentName !== previousEnvironmentName) {
+      this.lastSelectedEnvironmentName = previousEnvironmentName;
+    }
+
+    this.sceneManager.pausePhysics();
+
+    this.sceneManager.clearEnvironment();
+    this.sceneManager.clearItems();
+    this.sceneManager.clearParticles();
+
+    await this.sceneManager.loadEnvironment(environmentName);
+
+    await this.sceneManager.setupEnvironmentItems();
+
+    this.sceneManager.repositionCharacter();
+
+    this.sceneManager.forceActivateSmoothFollow();
+
+    if (this.sceneManager.getCurrentCharacterName() !== null) {
+      this.sceneManager.showPlayerMeshResumePhysicsAndRevealEnvironment();
+    }
+  }
+
   public static async changeEnvironment(
     environmentName: string,
     skipCutscene = false
   ): Promise<void> {
-    if (this.sceneManager) {
-      // Check if the environment is actually different from current
-      // Also check if environment has been loaded (to handle initial load case)
-      const currentEnvironment = this.sceneManager.getCurrentEnvironment();
-      const environmentLoaded = this.sceneManager.isEnvironmentLoaded();
-      if (currentEnvironment === environmentName && environmentLoaded) {
-        return; // No change needed
-      }
+    if (!this.sceneManager) {
+      return;
+    }
 
-      // Check for cutscene before switching environments (unless already played)
-      if (!skipCutscene) {
-        const foundEnv = ASSETS.ENVIRONMENTS.find((env) => env.name === environmentName);
-        if (foundEnv) {
-          const cutSceneProperty = foundEnv.cutScene;
-          if (cutSceneProperty) {
-            const cutSceneData = cutSceneProperty;
-            if (
-              typeof cutSceneData === 'object' &&
-              cutSceneData !== null &&
-              'type' in cutSceneData &&
-              'visualUrl' in cutSceneData
-            ) {
-              const csType = cutSceneData.type;
-              const csVisualUrl = cutSceneData.visualUrl;
-              if ((csType === 'image' || csType === 'video') && typeof csVisualUrl === 'string') {
-                const scene = this.sceneManager.getScene();
-                if (scene) {
-                  // Stop old background music before playing cutscene to avoid awkward fade after cutscene
-                  try {
-                    await AudioManager.stopAndDisposeBackgroundMusic(500);
-                  } catch {
-                    // Ignore errors stopping background music
-                  }
+    const currentEnvironment = this.sceneManager.getCurrentEnvironment();
+    const environmentLoaded = this.sceneManager.isEnvironmentLoaded();
+    if (currentEnvironment === environmentName && environmentLoaded) {
+      return;
+    }
 
-                  const cutScene: CutScene = {
-                    type: csType,
-                    visualUrl: csVisualUrl,
-                    audioUrl:
-                      'audioUrl' in cutSceneData && typeof cutSceneData.audioUrl === 'string'
-                        ? cutSceneData.audioUrl
-                        : undefined
-                  };
+    this.closePanel();
+
+    if (!skipCutscene) {
+      const foundEnv = ASSETS.ENVIRONMENTS.find((env) => env.name === environmentName);
+      if (foundEnv) {
+        const cutSceneProperty = foundEnv.cutScene;
+        if (cutSceneProperty) {
+          const cutSceneData = cutSceneProperty;
+          if (
+            typeof cutSceneData === 'object' &&
+            cutSceneData !== null &&
+            'type' in cutSceneData &&
+            'visualUrl' in cutSceneData
+          ) {
+            const csType = cutSceneData.type;
+            const csVisualUrl = cutSceneData.visualUrl;
+            if ((csType === 'image' || csType === 'video') && typeof csVisualUrl === 'string') {
+              const scene = this.sceneManager.getScene();
+              if (scene) {
+                try {
+                  await AudioManager.stopAndDisposeBackgroundMusic(500);
+                } catch {
+                  // Ignore errors stopping background music
+                }
+
+                const sceneCutData = cutSceneData as Record<string, unknown>;
+
+                let concurrent = false;
+                if ('concurrent' in sceneCutData) {
+                  concurrent = sceneCutData.concurrent === true;
+                }
+
+                let fadeInEnabled = false;
+                if ('fadeInEnabled' in sceneCutData) {
+                  fadeInEnabled = sceneCutData.fadeInEnabled === true;
+                }
+                let fadeOutEnabled = false;
+                if ('fadeOutEnabled' in sceneCutData) {
+                  fadeOutEnabled = sceneCutData.fadeOutEnabled === true;
+                }
+                const fadeDurationCandidate = sceneCutData.fadeDurationMs;
+                const fadeDurationMs =
+                  typeof fadeDurationCandidate === 'number' &&
+                  Number.isFinite(fadeDurationCandidate) &&
+                  fadeDurationCandidate > 0
+                    ? fadeDurationCandidate
+                    : undefined;
+
+                const cutScene: CutScene = {
+                  type: csType,
+                  visualUrl: csVisualUrl,
+                  audioUrl:
+                    'audioUrl' in cutSceneData && typeof cutSceneData.audioUrl === 'string'
+                      ? cutSceneData.audioUrl
+                      : undefined,
+                  ...(concurrent ? { concurrent: true } : {}),
+                  ...(fadeInEnabled ? { fadeInEnabled: true } : {}),
+                  ...(fadeOutEnabled ? { fadeOutEnabled: true } : {}),
+                  ...(fadeDurationMs !== undefined ? { fadeDurationMs } : {})
+                };
+
+                const loadEnv = (): Promise<void> =>
+                  SettingsUI.runEnvironmentSwitchAfterCutscene(environmentName, currentEnvironment);
+
+                if (concurrent) {
+                  await Promise.all([
+                    CutSceneManager.playCutScene(scene, cutScene).catch(() => {
+                      // Cutscene failed; environment load continues
+                    }),
+                    loadEnv()
+                  ]);
+                } else {
                   try {
                     await CutSceneManager.playCutScene(scene, cutScene);
                   } catch {
                     // Cutscene failed, continue with environment switch
                   }
+                  await loadEnv();
                 }
+                return;
               }
             }
           }
         }
       }
-
-      // Only update lastSelectedEnvironmentName if switching to a different environment
-      // Save the current environment as the last selected before switching
-      // This preserves the previous selection for use when current environment gets locked
-      if (environmentName !== currentEnvironment) {
-        this.lastSelectedEnvironmentName = currentEnvironment;
-      }
-
-      // Pause physics to prevent character from falling during environment change
-      this.sceneManager.pausePhysics();
-
-      // Clear existing environment, items, and particles
-      this.sceneManager.clearEnvironment();
-      this.sceneManager.clearItems();
-      this.sceneManager.clearParticles();
-
-      // Load the new environment
-      await this.sceneManager.loadEnvironment(environmentName);
-
-      // Set up environment items for the new environment
-      await this.sceneManager.setupEnvironmentItems();
-
-      // Reposition character to safe location in new environment
-      this.sceneManager.repositionCharacter();
-
-      // Force activate smooth camera following after environment transition
-      this.sceneManager.forceActivateSmoothFollow();
-
-      // Resume physics after environment is loaded
-      this.sceneManager.resumePhysics();
     }
+
+    await SettingsUI.runEnvironmentSwitchAfterCutscene(environmentName, currentEnvironment);
   }
 
   /**

@@ -69,6 +69,9 @@ export class SceneManager {
   /** When true, dev [ScenePerf] was skipped until CharacterLoader sets a playable character. */
   private scenePerfDevLogDeferred = false;
 
+  /** Env + sky meshes kept isVisible=false until character is ready and physics is resumed. */
+  private readonly environmentHiddenUntilCharacterReady: BABYLON.AbstractMesh[] = [];
+
   constructor(engine: BABYLON.Engine, canvas: HTMLCanvasElement) {
     void canvas;
     this.scene = new BABYLON.Scene(engine);
@@ -137,7 +140,7 @@ export class SceneManager {
     this.characterController = new CharacterController(this.scene);
 
     // Initialize CharacterLoader with scene and character controller
-    CharacterLoader.initialize(this.scene, this.characterController);
+    CharacterLoader.initialize(this.scene, this.characterController, this);
     registerDeferredScenePerfDevLogFlush((s) => {
       this.flushDeferredScenePerfDevLog(s);
     });
@@ -186,6 +189,47 @@ export class SceneManager {
 
   public getScene(): BABYLON.Scene {
     return this.scene;
+  }
+
+  private discardEnvironmentHiddenTracking(): void {
+    this.environmentHiddenUntilCharacterReady.length = 0;
+  }
+
+  private stashEnvironmentMeshesHidden(meshes: readonly BABYLON.AbstractMesh[]): void {
+    for (const mesh of meshes) {
+      if (mesh.isDisposed()) {
+        continue;
+      }
+      mesh.isVisible = false;
+      this.environmentHiddenUntilCharacterReady.push(mesh);
+    }
+  }
+
+  /**
+   * Shows environment geometry that was hidden during load. Call only after the playable
+   * character mesh is attached, enabled, and {@link resumePhysics} has been invoked.
+   */
+  public revealEnvironmentWhenCharacterReady(): void {
+    for (const mesh of this.environmentHiddenUntilCharacterReady) {
+      if (!mesh.isDisposed()) {
+        mesh.isVisible = true;
+      }
+    }
+    this.environmentHiddenUntilCharacterReady.length = 0;
+  }
+
+  /** Enables the real player mesh, resumes physics, then reveals hidden environment geometry. */
+  public showPlayerMeshResumePhysicsAndRevealEnvironment(): void {
+    if (this.characterController) {
+      const playerMesh = this.characterController.getPlayerMesh();
+      const displayCapsule = this.characterController.getDisplayCapsule();
+      if (playerMesh && playerMesh !== displayCapsule) {
+        playerMesh.isVisible = true;
+        playerMesh.setEnabled(true);
+      }
+    }
+    this.resumePhysics();
+    this.revealEnvironmentWhenCharacterReady();
   }
 
   public getCurrentCharacterName(): string | null {
@@ -245,6 +289,8 @@ export class SceneManager {
     this.disposeEnvironmentLights();
 
     try {
+      this.discardEnvironmentHiddenTracking();
+
       const result = await BABYLON.ImportMeshAsync(environment.model, this.scene);
 
       // Process node materials for environment meshes
@@ -264,6 +310,9 @@ export class SceneManager {
         }
       }
 
+      // Keep env invisible until character GLB is attached and physics is resumed (boot + switch).
+      this.stashEnvironmentMeshesHidden(result.meshes);
+
       // Handle background music crossfade
       try {
         if (environment.backgroundMusic) {
@@ -282,7 +331,8 @@ export class SceneManager {
       // Set up environment-specific sky if configured
       if (environment.sky !== undefined) {
         try {
-          SkyManager.createSky(this.scene, environment.sky);
+          const skyMesh = SkyManager.createSky(this.scene, environment.sky);
+          this.stashEnvironmentMeshesHidden([skyMesh]);
         } catch {
           // Ignore sky creation errors
         }
@@ -357,18 +407,8 @@ export class SceneManager {
 
       this.applyPostLoadPerformanceTuning();
 
-      // Re-enable character after environment switch is complete
-      if (this.characterController) {
-        this.characterController.resumePhysics();
-        // Only re-enable the player mesh if it is a real character model, not the
-        // display capsule (which should remain hidden until the model finishes loading)
-        const playerMesh = this.characterController.getPlayerMesh();
-        const displayCapsule = this.characterController.getDisplayCapsule();
-        if (playerMesh && playerMesh !== displayCapsule) {
-          playerMesh.isVisible = true;
-          playerMesh.setEnabled(true);
-        }
-      }
+      // Do not resume physics or show the world here: wait until the playable character is
+      // attached and physics is resumed (SettingsUI.changeEnvironment or CharacterLoader).
 
       // Apply environment-specific camera offset if configured
       if (environment.cameraOffset !== undefined) {
@@ -380,6 +420,7 @@ export class SceneManager {
         this.characterController.setRotation(environment.spawnRotation);
       }
     } catch {
+      this.revealEnvironmentWhenCharacterReady();
       // Ignore environment loading errors for playground compatibility
       // Re-enable character even if there was an error
       if (this.characterController) {
@@ -714,6 +755,8 @@ export class SceneManager {
   }
 
   public clearEnvironment(): void {
+    this.discardEnvironmentHiddenTracking();
+
     // Clear all environment-related meshes
     const environmentMeshes = this.scene.meshes.filter(
       (mesh) =>
