@@ -15,8 +15,14 @@ import { AudioManager } from './audio_manager';
 import { NodeMaterialManager } from './node_material_manager';
 import { VisualEffectsManager } from './visual_effects_manager';
 
+import type { SceneManager } from './scene_manager';
 import type { CharacterController } from '../controllers/character_controller';
 import type { Character } from '../types/character';
+
+type CharacterEnvironmentReadyGate = Pick<
+  SceneManager,
+  'showPlayerMeshResumePhysicsAndRevealEnvironment'
+>;
 
 export class CharacterLoader {
   private static readonly CHARACTER_ANIM_META_KEY = 'babylon_game_starter_character_name';
@@ -25,6 +31,7 @@ export class CharacterLoader {
   private static currentCharacterName: string | null = null;
   private static scene: BABYLON.Scene | null = null;
   private static characterController: CharacterController | null = null;
+  private static environmentReadyGate: CharacterEnvironmentReadyGate | null = null;
 
   private static tagCharacterAnimationGroups(
     characterName: string,
@@ -64,9 +71,14 @@ export class CharacterLoader {
    * @param scene The Babylon.js scene
    * @param characterController The character controller instance
    */
-  public static initialize(scene: BABYLON.Scene, characterController: CharacterController): void {
+  public static initialize(
+    scene: BABYLON.Scene,
+    characterController: CharacterController,
+    environmentReadyGate?: CharacterEnvironmentReadyGate | null
+  ): void {
     this.scene = scene;
     this.characterController = characterController;
+    this.environmentReadyGate = environmentReadyGate ?? null;
   }
 
   /**
@@ -100,6 +112,8 @@ export class CharacterLoader {
     if (this.currentCharacterName && this.currentCharacterName !== character.name) {
       this.disposeAnimationGroupsForCharacter(this.scene, this.currentCharacterName);
     }
+
+    const revealEnvironmentAfterThisLoad = this.currentCharacterName === null;
 
     BABYLON.ImportMeshAsync(character.model, this.scene)
       .then(async (result) => {
@@ -194,6 +208,11 @@ export class CharacterLoader {
       })
       .catch(() => {
         // Ignore character loading errors for playground compatibility
+      })
+      .finally(() => {
+        if (revealEnvironmentAfterThisLoad) {
+          this.environmentReadyGate?.showPlayerMeshResumePhysicsAndRevealEnvironment();
+        }
       });
   }
 

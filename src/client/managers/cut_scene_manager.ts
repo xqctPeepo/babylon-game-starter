@@ -8,7 +8,42 @@ import { Time } from '../utils/time';
 
 import type { CutScene } from '../types/environment';
 
+const DEFAULT_FADE_DURATION_MS = 600;
+
 export class CutSceneManager {
+  private static getFadeDurationMs(cutScene: CutScene): number {
+    const d = cutScene.fadeDurationMs;
+    return typeof d === 'number' && Number.isFinite(d) && d > 0 ? d : DEFAULT_FADE_DURATION_MS;
+  }
+
+  /**
+   * Animates an element's opacity from `from` to `to` over `durationMs` (CSS transition + timeout).
+   */
+  private static animateElementOpacity(
+    element: HTMLElement,
+    from: number,
+    to: number,
+    durationMs: number
+  ): Promise<void> {
+    if (durationMs <= 0) {
+      element.style.opacity = String(to);
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      element.style.transition = `opacity ${durationMs}ms ease-in-out`;
+      element.style.opacity = String(from);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          element.style.opacity = String(to);
+          window.setTimeout(() => {
+            element.style.transition = '';
+            resolve();
+          }, durationMs);
+        });
+      });
+    });
+  }
+
   /**
    * Plays a cutscene with fullscreen display
    * @param scene The Babylon.js scene to use for timing
@@ -16,6 +51,10 @@ export class CutSceneManager {
    * @returns Promise that resolves when the cutscene completes
    */
   public static async playCutScene(scene: BABYLON.Scene, cutScene: CutScene): Promise<void> {
+    const fadeMs = CutSceneManager.getFadeDurationMs(cutScene);
+    const fadeInEnabled = cutScene.fadeInEnabled === true;
+    const fadeOutEnabled = cutScene.fadeOutEnabled === true;
+
     // Create fullscreen overlay container
     const overlay = document.createElement('div');
     overlay.style.cssText = `
@@ -34,7 +73,6 @@ export class CutSceneManager {
     let audioElement: HTMLAudioElement | null = null;
     let fadeObserver: BABYLON.Observer<BABYLON.Scene> | null = null;
     let cleanupObserver: BABYLON.Observer<BABYLON.Scene> | null = null;
-
     try {
       // Create audio element if audioUrl is provided
       if (cutScene.audioUrl) {
@@ -51,7 +89,6 @@ export class CutSceneManager {
 
       // Handle image type
       if (cutScene.type === 'image') {
-        // Append overlay to DOM first so it's visible immediately
         document.body.appendChild(overlay);
 
         const img = document.createElement('img');
@@ -60,20 +97,23 @@ export class CutSceneManager {
                     width: 100%;
                     height: 100%;
                     object-fit: cover;
+                    opacity: ${fadeInEnabled ? 0 : 1};
                 `;
         overlay.appendChild(img);
 
         // Wait for image to load
-        // If image fails to load, still show overlay for minimum duration
         await new Promise<void>((resolve) => {
           img.onload = () => {
             resolve();
           };
           img.onerror = () => {
-            // Continue even if image fails - overlay is already visible
             resolve();
           };
         });
+
+        if (fadeInEnabled) {
+          await CutSceneManager.animateElementOpacity(img, 0, 1, fadeMs);
+        }
 
         // Start audio fade-out at 9 seconds (1 second before end)
         if (audioElement) {
@@ -89,12 +129,15 @@ export class CutSceneManager {
           });
         }
 
-        // Wait 10 seconds using Time utility
         await new Promise<void>((resolve) => {
           Time.runDelayed(scene, 10000, () => {
             resolve();
           });
         });
+
+        if (fadeOutEnabled) {
+          await CutSceneManager.animateElementOpacity(img, 1, 0, fadeMs);
+        }
       }
       // Handle video type
       else if (cutScene.type === 'video') {
@@ -102,26 +145,23 @@ export class CutSceneManager {
         video.src = cutScene.visualUrl;
         video.autoplay = true;
         video.playsInline = true;
-        // Try to play with audio first, fall back to muted if autoplay fails
         video.muted = false;
         video.style.cssText = `
                     width: 100%;
                     height: 100%;
                     object-fit: cover;
+                    opacity: ${fadeInEnabled ? 0 : 1};
                 `;
         overlay.appendChild(video);
 
         document.body.appendChild(overlay);
 
-        // Wait for video to load and start playing
         await new Promise<void>((resolve, reject) => {
           video.onloadeddata = async () => {
-            // Try to play with audio
             try {
               await video.play();
               resolve();
             } catch {
-              // Autoplay with sound failed, try muted
               video.muted = true;
               try {
                 await video.play();
@@ -136,7 +176,10 @@ export class CutSceneManager {
           };
         });
 
-        // Start audio fade-out when video is near end
+        if (fadeInEnabled) {
+          await CutSceneManager.animateElementOpacity(video, 0, 1, fadeMs);
+        }
+
         if (audioElement) {
           cleanupObserver = scene.onBeforeRenderObservable.add(() => {
             if (video.readyState >= 2) {
@@ -152,21 +195,22 @@ export class CutSceneManager {
           });
         }
 
-        // Wait for video to end
         await new Promise<void>((resolve) => {
           video.onended = () => {
             resolve();
           };
         });
+
+        if (fadeOutEnabled) {
+          await CutSceneManager.animateElementOpacity(video, 1, 0, fadeMs);
+        }
       }
 
-      // Stop audio if still playing
       if (audioElement) {
         audioElement.pause();
         audioElement.currentTime = 0;
       }
     } finally {
-      // Clean up observers
       if (fadeObserver) {
         scene.onBeforeRenderObservable.remove(fadeObserver);
       }
@@ -174,7 +218,6 @@ export class CutSceneManager {
         scene.onBeforeRenderObservable.remove(cleanupObserver);
       }
 
-      // Remove DOM elements
       if (overlay.parentElement) {
         overlay.remove();
       }

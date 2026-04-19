@@ -27,6 +27,21 @@ export interface CutScene {
   readonly type: CutSceneType;
   readonly visualUrl: string;
   readonly audioUrl?: string;
+  /**
+   * When true, the target environment may load while this cutscene plays. When false or omitted,
+   * the environment loads only after cutscene playback ends.
+   */
+  readonly concurrent?: boolean;
+  /**
+   * When true, the cutscene image or video opacity eases from 0 to 1 so the visual appears from black.
+   */
+  readonly fadeInEnabled?: boolean;
+  /**
+   * When true, the cutscene image or video opacity eases from 1 to 0 before the overlay is removed.
+   */
+  readonly fadeOutEnabled?: boolean;
+  /** Duration in ms for each fade phase that is enabled; defaults to 600 when omitted. */
+  readonly fadeDurationMs?: number;
 }
 
 export interface PhysicsObject {

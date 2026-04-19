@@ -299,7 +299,9 @@ export const ASSETS = {
         visualUrl:
           'https://raw.githubusercontent.com/EricEisaman/assets/main/images/MushroomVillage.jpg',
         audioUrl:
-          'https://raw.githubusercontent.com/EricEisaman/assets/main/audio/bgm/HappyCinematic.mp3'
+          'https://raw.githubusercontent.com/EricEisaman/assets/main/audio/bgm/HappyCinematic.mp3',
+        concurrent: true,
+        fadeOutEnabled: true
       },
       model:
         'https://raw.githubusercontent.com/EricEisaman/assets/main/environment/mushroom_village.glb',
@@ -429,7 +431,9 @@ export const ASSETS = {
       isDefault: false,
       cutScene: {
         type: 'video',
-        visualUrl: 'https://raw.githubusercontent.com/EricEisaman/assets/main/videos/FlatCity.mp4'
+        visualUrl: 'https://raw.githubusercontent.com/EricEisaman/assets/main/videos/FlatCity.mp4',
+        concurrent: false,
+        fadeOutEnabled: true
       },
       model: 'https://raw.githubusercontent.com/EricEisaman/assets/main/environment/city-flat.glb',
       lightmap: '',

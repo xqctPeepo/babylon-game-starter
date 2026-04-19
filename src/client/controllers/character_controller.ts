@@ -413,7 +413,8 @@ export class CharacterController {
     // This would need to be connected to HUDManager
   }
 
-  private resetCameraToDefaultOffset(): void {
+  /** Same behavior as the reset-camera key (e.g. `1`): default follow offset + smooth follow reactivated. */
+  public resetCameraToDefaultOffset(): void {
     if (this.cameraController) {
       this.cameraController.resetCameraToDefaultOffset();
     }
