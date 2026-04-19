@@ -27,6 +27,8 @@ export class CharacterController {
   private state: CharacterState = CHARACTER_STATES.IN_AIR;
   private wantJump = false;
   private inputDirection = new BABYLON.Vector3(0, 0, 0);
+  /** Reused for zeroing physics velocity without per-call allocations. */
+  private readonly zeroLinearVelocity = new BABYLON.Vector3(0, 0, 0);
   private targetRotationY = 0;
   private keysDown = new Set<string>();
   private cameraController: SmoothFollowCameraController | null = null;
@@ -857,7 +859,7 @@ export class CharacterController {
     this.displayCapsule.scaling.z = character.radius / 0.6; // Scale radius
 
     // Reset physics state for new character
-    this.characterController.setVelocity(new BABYLON.Vector3(0, 0, 0));
+    this.characterController.setVelocity(this.zeroLinearVelocity);
     this.inputDirection.setAll(0);
     this.wantJump = false;
     this.boostActive = false;
@@ -1078,7 +1080,7 @@ export class CharacterController {
   public pausePhysics(): void {
     this.physicsPaused = true;
     // Set velocity to zero to stop movement
-    this.characterController.setVelocity(new BABYLON.Vector3(0, 0, 0));
+    this.characterController.setVelocity(this.zeroLinearVelocity);
   }
 
   /**
@@ -1103,7 +1105,7 @@ export class CharacterController {
     const environment = ASSETS.ENVIRONMENTS.find((env) => env.name === 'Level Test');
     const spawnPoint = environment?.spawnPoint ?? new BABYLON.Vector3(0, 0, 0);
     this.characterController.setPosition(spawnPoint);
-    this.characterController.setVelocity(new BABYLON.Vector3(0, 0, 0));
+    this.characterController.setVelocity(this.zeroLinearVelocity);
     this.inputDirection.setAll(0);
     this.wantJump = false;
     this.boostActive = false;

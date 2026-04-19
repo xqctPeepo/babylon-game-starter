@@ -6,7 +6,6 @@
 import '@babylonjs/core/Legacy/legacy';
 import '@babylonjs/loaders/legacy/legacy';
 import '@babylonjs/materials/legacy/legacy';
-import '@babylonjs/inspector';
 import {
   CreateSoundAsync,
   CreateStreamingSoundAsync
@@ -14,11 +13,52 @@ import {
 import { CreateAudioEngineAsync } from '@babylonjs/core/AudioV2/webAudio/webAudioEngine';
 import * as PhysicsV2 from '@babylonjs/core/Physics/v2/index';
 
+import { CONFIG } from './config/game_config';
+import { devLog } from './utils/dev_log';
+import { readScenePerfConsoleContext } from './utils/scene_perf_console_stamp';
+import {
+  collectScenePerformanceStats,
+  formatScenePerformanceStats
+} from './utils/scene_performance_stats';
+
 import { Playground } from './index';
 
 // Global variables
 let engine: BABYLON.Engine | null = null;
 let scene: BABYLON.Scene | null = null;
+
+async function loadInspectorIfDev(): Promise<void> {
+  if (import.meta.env.DEV) {
+    await import('@babylonjs/inspector');
+  }
+}
+
+async function createEngine(canvas: HTMLCanvasElement): Promise<BABYLON.Engine> {
+  const engineOpts = {
+    antialias: true,
+    powerPreference: 'high-performance' as const
+  };
+
+  if (CONFIG.PERFORMANCE.WEBGPU_WHEN_AVAILABLE) {
+    const nav = navigator as Navigator & { gpu?: GPU };
+    if (nav.gpu) {
+      try {
+        const { WebGPUEngine } = await import('@babylonjs/core/Engines/webgpuEngine');
+        const webgpu = new WebGPUEngine(canvas, {
+          ...engineOpts,
+          powerPreference: 'high-performance'
+        });
+        await webgpu.initAsync();
+        devLog('[Main] WebGPU engine active');
+        return webgpu as unknown as BABYLON.Engine;
+      } catch (err) {
+        devLog('[Main] WebGPU unavailable, using WebGL', err);
+      }
+    }
+  }
+
+  return new BABYLON.Engine(canvas, true, engineOpts);
+}
 
 async function initializeRuntimeGlobals(): Promise<void> {
   const g = globalThis as typeof globalThis & {
@@ -94,7 +134,8 @@ async function initializeRuntimeGlobals(): Promise<void> {
  */
 async function initialize(): Promise<void> {
   try {
-    console.log('[Main] Initializing Babylon Game Starter...');
+    devLog('[Main] Initializing Babylon Game Starter...');
+    await loadInspectorIfDev();
 
     // Get canvas element
     const canvasElement = document.getElementById('renderCanvas');
@@ -103,22 +144,19 @@ async function initialize(): Promise<void> {
     }
     const canvas = canvasElement;
 
-    console.log('[Main] Canvas found');
+    devLog('[Main] Canvas found');
 
-    // Create engine
-    engine = new BABYLON.Engine(canvas, true, {
-      antialias: true,
-      powerPreference: 'high-performance'
-    });
+    // Create engine (WebGPU when available, else WebGL)
+    engine = await createEngine(canvas);
 
-    console.log('[Main] Engine created');
+    devLog('[Main] Engine created');
 
     await initializeRuntimeGlobals();
 
     // Create scene using Playground
-    console.log('[Main] Creating scene from Playground...');
+    devLog('[Main] Creating scene from Playground...');
     scene = Playground.CreateScene(engine, canvas);
-    console.log('[Main] Scene created successfully');
+    devLog('[Main] Scene created successfully');
 
     // Setup render loop
     setupRenderLoop();
@@ -126,7 +164,7 @@ async function initialize(): Promise<void> {
     // Hide loading screen
     hideLoadingScreen();
 
-    console.log('[Main] Initialization complete');
+    devLog('[Main] Initialization complete');
   } catch (error) {
     console.error('[Main] Initialization failed:', error);
     displayError(error instanceof Error ? error.message : String(error));
@@ -157,7 +195,7 @@ function setupRenderLoop(): void {
 function hideLoadingScreen(): void {
   const loadingScreen = document.getElementById('loadingScreen');
   if (loadingScreen && !loadingScreen.classList.contains('hidden')) {
-    console.log('[Main] Hiding loading screen');
+    devLog('[Main] Hiding loading screen');
     loadingScreen.classList.add('hidden');
   }
 }
@@ -206,7 +244,20 @@ window.addEventListener('beforeunload', () => {
 window.__babylon = {
   BABYLON,
   engine: () => engine,
-  scene: () => scene
+  scene: () => scene,
+  logSceneStats: () => {
+    if (!scene) {
+      return;
+    }
+    const { environmentName, characterName } = readScenePerfConsoleContext(scene);
+    const stats = collectScenePerformanceStats(scene, {
+      environmentName,
+      characterName,
+      loggedAtIso: new Date().toISOString()
+    });
+    devLog(formatScenePerformanceStats(stats));
+    return stats;
+  }
 };
 
 // Initialize when DOM is ready
@@ -218,4 +269,4 @@ if (document.readyState === 'loading') {
   void initialize();
 }
 
-console.log('[Main] Module loaded, ready to initialize');
+devLog('[Main] Module loaded, ready to initialize');

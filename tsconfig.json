@@ -23,7 +23,7 @@
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
-    "types": ["babylonjs", "babylonjs-loaders", "babylonjs-materials"]
+    "types": ["babylonjs", "babylonjs-loaders", "babylonjs-materials", "vite/client"]
   },
   "include": [
     "src/client/**/*.ts",

@@ -54,6 +54,17 @@ export const CONFIG: GameConfig = {
     CAPSULE_VISIBLE: false
   },
 
+  PERFORMANCE: {
+    CAMERA_MAX_Z: 8000,
+    SCENE_OPTIMIZER_ENABLED: true,
+    SCENE_OPTIMIZER_TARGET_FPS: 55,
+    SCENE_OPTIMIZER_TRACK_MS: 2500,
+    HARDWARE_SCALING_MAX: 2,
+    HARDWARE_SCALING_STEP: 0.25,
+    // WebGL is the default: WebGPU + PBR/light UBOs still hit edge cases in some scenes (bind group / Light0).
+    WEBGPU_WHEN_AVAILABLE: false
+  },
+
   // Effects Settings
   EFFECTS: {
     PARTICLE_SNIPPETS: [

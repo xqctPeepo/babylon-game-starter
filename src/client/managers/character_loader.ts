@@ -6,6 +6,10 @@
 
 import { ASSETS } from '../config/assets';
 import { CONFIG } from '../config/game_config';
+import {
+  stampScenePerfConsoleContext,
+  tryFlushDeferredScenePerfDevLog
+} from '../utils/scene_perf_console_stamp';
 
 import { AudioManager } from './audio_manager';
 import { NodeMaterialManager } from './node_material_manager';
@@ -30,6 +34,17 @@ export class CharacterLoader {
       const meta = (group.metadata ??= {}) as Record<string, unknown>;
       meta[this.CHARACTER_ANIM_META_KEY] = characterName;
     }
+  }
+
+  private static stampCharacterPerfContext(characterName: string): void {
+    if (!this.scene) {
+      return;
+    }
+    stampScenePerfConsoleContext(this.scene, {
+      characterName,
+      loggedAtIso: new Date().toISOString()
+    });
+    tryFlushDeferredScenePerfDevLog(this.scene);
   }
 
   private static disposeAnimationGroupsForCharacter(
@@ -111,6 +126,7 @@ export class CharacterLoader {
           // Cache the character meshes
           this.characterCache.set(character.name, result.meshes);
           this.currentCharacterName = character.name;
+          this.stampCharacterPerfContext(character.name);
 
           const rootMesh = result.meshes[0];
           if (!rootMesh) {
@@ -232,6 +248,8 @@ export class CharacterLoader {
       preservedPosition?.clone() ?? this.characterController.getPosition().clone();
     this.characterController.updateCharacterPhysics(character, spawnPosition);
     this.characterController.animationController.setCharacter(character);
+
+    this.stampCharacterPerfContext(character.name);
   }
 
   /**

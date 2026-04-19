@@ -27,6 +27,10 @@ interface BehaviorInstance {
   behaviorActive: boolean;
   lastCheckTime: number;
   lastActionTime: number;
+  /** Throttle proximity evaluation when checkPeriod is interval (ms since epoch). */
+  lastProximityEvaluationTime: number;
+  /** Cached trigger result aligned with lastProximityEvaluationTime window. */
+  cachedProximityTriggerResult: boolean;
 }
 
 export class BehaviorManager {
@@ -67,7 +71,9 @@ export class BehaviorManager {
       config: behaviorConfig,
       behaviorActive: false,
       lastCheckTime: Date.now(),
-      lastActionTime: 0
+      lastActionTime: 0,
+      lastProximityEvaluationTime: 0,
+      cachedProximityTriggerResult: false
     };
 
     this.instances.set(identifier, instance);
@@ -184,6 +190,15 @@ export class BehaviorManager {
     }
 
     const config: ProximityTriggerConfig = instance.config;
+    const checkPeriod = this.getCheckPeriod(config);
+    const now = Date.now();
+    if (checkPeriod.type === 'interval') {
+      if (now - instance.lastProximityEvaluationTime < checkPeriod.milliseconds) {
+        return instance.cachedProximityTriggerResult;
+      }
+      instance.lastProximityEvaluationTime = now;
+    }
+
     const characterPosition = this.characterController.getPosition();
 
     let instancePosition: BABYLON.Vector3;
@@ -210,11 +225,9 @@ export class BehaviorManager {
     const distanceSquared = BABYLON.Vector3.DistanceSquared(characterPosition, instancePosition);
     const isWithinRadius = distanceSquared <= radiusSquared;
 
-    if (config.triggerOutOfRange === true) {
-      return !isWithinRadius;
-    }
-
-    return isWithinRadius;
+    const result = config.triggerOutOfRange === true ? !isWithinRadius : isWithinRadius;
+    instance.cachedProximityTriggerResult = result;
+    return result;
   }
 
   /**

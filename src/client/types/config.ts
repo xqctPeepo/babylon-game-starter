@@ -45,12 +45,31 @@ export interface DebugConfig {
   readonly CAPSULE_VISIBLE: boolean;
 }
 
+/** Rendering / engine tuning (SceneOptimizer, WebGPU, camera). OpenPBR / IBL / SDF text are optional product choices when a measured need appears. */
+export interface PerformanceConfig {
+  /** Far clip plane for the main camera (smaller = better depth precision when safe). */
+  readonly CAMERA_MAX_Z: number;
+  /** Babylon SceneOptimizer: adaptive hardware scaling toward a target FPS. */
+  readonly SCENE_OPTIMIZER_ENABLED: boolean;
+  readonly SCENE_OPTIMIZER_TARGET_FPS: number;
+  readonly SCENE_OPTIMIZER_TRACK_MS: number;
+  /** Passed to HardwareScalingOptimization (max engine hardware scaling level). */
+  readonly HARDWARE_SCALING_MAX: number;
+  readonly HARDWARE_SCALING_STEP: number;
+  /**
+   * Prefer WebGPUEngine when the browser exposes WebGPU; falls back to WebGL Engine.
+   * Default off: some scenes still hit WebGPU material/bind-group edge cases; enable when validated.
+   */
+  readonly WEBGPU_WHEN_AVAILABLE: boolean;
+}
+
 export interface GameConfig {
   readonly CHARACTER: CharacterConfig;
   readonly CAMERA: CameraConfig;
   readonly PHYSICS: PhysicsConfig;
   readonly ANIMATION: AnimationConfig;
   readonly DEBUG: DebugConfig;
+  readonly PERFORMANCE: PerformanceConfig;
   readonly EFFECTS: EffectsConfig;
   readonly HUD: HUDConfig;
   readonly SETTINGS: SettingsConfig;
