@@ -230,6 +230,10 @@ export class SceneManager {
     }
     this.resumePhysics();
     this.revealEnvironmentWhenCharacterReady();
+    // Same as reset-camera key (e.g. `1`) after physics is on: default offset + smooth follow cleared.
+    if (this.characterController) {
+      this.characterController.resetCameraToDefaultOffset();
+    }
   }
 
   public getCurrentCharacterName(): string | null {
