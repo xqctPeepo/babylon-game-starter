@@ -92,8 +92,7 @@ export class BehaviorManager {
     }
 
     const fr = environment.fallRespawn;
-    const minSafeY =
-      fr?.minSafeY ?? environment.spawnPoint.y - DEFAULT_FALL_DEPTH_BELOW_SPAWN;
+    const minSafeY = fr?.minSafeY ?? environment.spawnPoint.y - DEFAULT_FALL_DEPTH_BELOW_SPAWN;
     const fullConfig: FallOutOfWorldTriggerConfig = {
       triggerKind: 'fallOutOfWorld',
       ...(fr ?? {}),

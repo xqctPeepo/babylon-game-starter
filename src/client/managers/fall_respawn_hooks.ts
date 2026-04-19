@@ -9,10 +9,7 @@ const warnedUnknown = new Set<string>();
 
 let globalOnFellOffMapHook: (() => void | Promise<void>) | null = null;
 
-export function registerFallRespawnHandler(
-  id: string,
-  fn: () => void | Promise<void>
-): void {
+export function registerFallRespawnHandler(id: string, fn: () => void | Promise<void>): void {
   handlers.set(id, fn);
 }
 
