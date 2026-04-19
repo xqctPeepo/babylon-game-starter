@@ -5,6 +5,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"eslint.config.js\" \"vite.config.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"eslint.config.js\" \"vite.config.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "preview": "vite preview",
     "export:playground": "node scripts/generate-playground-json.mjs",
@@ -19,10 +23,17 @@
     "@babylonjs/materials": "^9.1.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^22.19.17",
     "babylonjs": "^9.1.0",
     "babylonjs-loaders": "^9.1.0",
     "babylonjs-materials": "^9.1.0",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-import": "^2.32.0",
+    "prettier": "^3.8.3",
     "typescript": "^5.3.3",
+    "typescript-eslint": "^8.58.2",
     "vite": "^5.0.8"
   }
 }

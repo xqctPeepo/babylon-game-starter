@@ -4,67 +4,74 @@
 
 // /// <reference path="./types/babylon.d.ts" />
 
-import { SceneManager } from './managers/SceneManager';
-import { SettingsUI } from './ui/SettingsUI';
-import { InventoryUI } from './ui/InventoryUI';
-import { HUDManager } from './managers/HUDManager';
-import { switchToEnvironment } from './utils/switch-environment';
 import { ASSETS } from './config/assets';
-import { queryHook } from './utils/query-hook';
+import { CharacterLoader } from './managers/character_loader';
+import { HUDManager } from './managers/hud_manager';
+import { SceneManager } from './managers/scene_manager';
+import { InventoryUI } from './ui/inventory_ui';
+import { SettingsUI } from './ui/settings_ui';
+import { queryHook } from './utils/query_hook';
+import { switchToEnvironment } from './utils/switch_environment';
 
 /**
  * Global cleanup function to remove all UI elements from DOM
  * This prevents orphaned elements when the playground is rerun
  */
 function cleanupUI(): void {
-    HUDManager.cleanup();
-    SettingsUI.cleanup();
-    InventoryUI.cleanup();
+  HUDManager.cleanup();
+  SettingsUI.cleanup();
+  InventoryUI.cleanup();
 }
 
 class Playground {
-    public static CreateScene(engine: BABYLON.Engine, canvas: HTMLCanvasElement): BABYLON.Scene {
-        // Clean up any existing UI elements before creating new ones
-        cleanupUI();
-        
-        const sceneManager = new SceneManager(engine, canvas);
+  public static CreateScene(engine: BABYLON.Engine, canvas: HTMLCanvasElement): BABYLON.Scene {
+    // Clean up any existing UI elements before creating new ones
+    cleanupUI();
 
-        // Initialize settings UI with scene manager
-        SettingsUI.initialize(canvas, sceneManager);
+    const sceneManager = new SceneManager(engine, canvas);
 
-        // Initialize inventory UI with scene manager
-        InventoryUI.initialize(canvas, sceneManager);
+    // Initialize settings UI with scene manager
+    SettingsUI.initialize(canvas, sceneManager);
 
-        // Check for fullscreen query parameter and activate if present
-        queryHook(['fullscreen'], (values) => {
-            const fullscreenValue = values.get('fullscreen');
-            if (fullscreenValue && fullscreenValue.toLowerCase() === 'true') {
-                SettingsUI.toggleSplitRendering(true);
-            }
-        });
+    // Initialize inventory UI with scene manager
+    InventoryUI.initialize(canvas, sceneManager);
 
-        // Check for pgui query parameter and hide Babylon Playground UI if false
-        queryHook(['pgui'], (values) => {
-            const pguiValue = values.get('pgui');
-            if (pguiValue && pguiValue.toLowerCase() === 'false') {
-                SettingsUI.togglePlaygroundUI(false);
-            }
-        });
+    // Check for fullscreen query parameter and activate if present
+    queryHook(['fullscreen'], (values) => {
+      const fullscreenValue = values.get('fullscreen');
+      if (fullscreenValue?.toLowerCase() === 'true') {
+        SettingsUI.toggleSplitRendering(true);
+      }
+    });
 
-        // Complete scene initialization
-        sceneManager.completeInitialization();
-        
-        // Trigger initial environment load with cutscene support
-        // TypeScript needs help narrowing the type from the satisfies constraint
-        const defaultEnv = ASSETS.ENVIRONMENTS.find(env => 'isDefault' in env && env.isDefault === true) || ASSETS.ENVIRONMENTS[0];
-        const defaultEnvironment = defaultEnv.name;
-        switchToEnvironment(defaultEnvironment).then(() => {
-            // Load character model after environment is loaded
-            sceneManager.loadCharacterModel();
-        });
+    // Check for pgui query parameter and hide Babylon Playground UI if false
+    queryHook(['pgui'], (values) => {
+      const pguiValue = values.get('pgui');
+      if (pguiValue?.toLowerCase() === 'false') {
+        SettingsUI.togglePlaygroundUI(false);
+      }
+    });
 
-        return sceneManager.getScene();
+    // Complete scene initialization
+    sceneManager.completeInitialization();
+
+    // Trigger initial environment load with cutscene support
+    // TypeScript needs help narrowing the type from the satisfies constraint
+    const defaultEnv =
+      ASSETS.ENVIRONMENTS.find((env) => 'isDefault' in env && env.isDefault === true) ??
+      ASSETS.ENVIRONMENTS[0];
+    if (!defaultEnv) {
+      throw new Error('ASSETS.ENVIRONMENTS must contain at least one environment');
     }
+    const defaultEnvironment = defaultEnv.name;
+    void switchToEnvironment(defaultEnvironment).then(() => {
+      // Load character model after environment is loaded
+      const spawnPoint = defaultEnv.spawnPoint ?? new BABYLON.Vector3(0, 1, 0);
+      CharacterLoader.loadCharacterModel(undefined, undefined, spawnPoint);
+    });
+
+    return sceneManager.getScene();
+  }
 }
 
 export { Playground };

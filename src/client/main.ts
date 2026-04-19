@@ -7,9 +7,12 @@ import '@babylonjs/core/Legacy/legacy';
 import '@babylonjs/loaders/legacy/legacy';
 import '@babylonjs/materials/legacy/legacy';
 import '@babylonjs/inspector';
-import * as PhysicsV2 from '@babylonjs/core/Physics/v2/index';
+import {
+  CreateSoundAsync,
+  CreateStreamingSoundAsync
+} from '@babylonjs/core/AudioV2/abstractAudio/audioEngineV2';
 import { CreateAudioEngineAsync } from '@babylonjs/core/AudioV2/webAudio/webAudioEngine';
-import { CreateSoundAsync, CreateStreamingSoundAsync } from '@babylonjs/core/AudioV2/abstractAudio/audioEngineV2';
+import * as PhysicsV2 from '@babylonjs/core/Physics/v2/index';
 
 import { Playground } from './index';
 
@@ -18,140 +21,145 @@ let engine: BABYLON.Engine | null = null;
 let scene: BABYLON.Scene | null = null;
 
 async function initializeRuntimeGlobals(): Promise<void> {
-    const g = globalThis as typeof globalThis & {
-        BABYLON?: Record<string, unknown>;
-        HavokPhysics?: () => Promise<unknown>;
-        HK?: unknown;
-        __babylonAudioEngine?: typeof globalThis.__babylonAudioEngine;
+  const g = globalThis as typeof globalThis & {
+    BABYLON?: Record<string, unknown>;
+    HavokPhysics?: () => Promise<unknown>;
+    HK?: unknown;
+    __babylonAudioEngine?: typeof globalThis.__babylonAudioEngine;
+  };
+
+  // Ensure v2 physics APIs are available on global BABYLON (Playground-style access).
+  if (g.BABYLON) {
+    Object.assign(g.BABYLON as Record<string, unknown>, PhysicsV2 as Record<string, unknown>);
+    (g.BABYLON as Record<string, unknown>).PhysicsCharacterController =
+      PhysicsV2.PhysicsCharacterController as unknown;
+    (g.BABYLON as Record<string, unknown>).CharacterSupportedState =
+      PhysicsV2.CharacterSupportedState as unknown;
+    (g.BABYLON as Record<string, unknown>).CreateAudioEngineAsync =
+      CreateAudioEngineAsync as unknown;
+
+    (g.BABYLON as Record<string, unknown>).CreateSoundAsync = CreateSoundAsync as unknown;
+    (g.BABYLON as Record<string, unknown>).CreateStreamingSoundAsync =
+      CreateStreamingSoundAsync as unknown;
+    // Babylon v9 rewrites default CDN paths to versioned URLs (e.g. /v9.2.0/...);
+    // Draco decoder assets are not always published under versioned paths.
+    const bjs = g.BABYLON as {
+      Tools?: { ScriptBaseUrl?: string };
+      DracoCompression?: {
+        Configuration?: {
+          decoder?: {
+            wasmUrl?: string;
+            wasmBinaryUrl?: string;
+            fallbackUrl?: string;
+          };
+        };
+      };
     };
 
-    // Ensure v2 physics APIs are available on global BABYLON (Playground-style access).
-    if (g.BABYLON) {
-        Object.assign(g.BABYLON as Record<string, unknown>, PhysicsV2 as Record<string, unknown>);
-        (g.BABYLON as Record<string, unknown>).PhysicsCharacterController = PhysicsV2.PhysicsCharacterController as unknown;
-        (g.BABYLON as Record<string, unknown>).CharacterSupportedState = PhysicsV2.CharacterSupportedState as unknown;
-        (g.BABYLON as Record<string, unknown>).CreateAudioEngineAsync = CreateAudioEngineAsync as unknown;
-
-        (g.BABYLON as Record<string, unknown>).CreateSoundAsync = CreateSoundAsync as unknown;
-        (g.BABYLON as Record<string, unknown>).CreateStreamingSoundAsync = CreateStreamingSoundAsync as unknown;
-        // Babylon v9 rewrites default CDN paths to versioned URLs (e.g. /v9.2.0/...);
-        // Draco decoder assets are not always published under versioned paths.
-        const bjs = g.BABYLON as {
-            Tools?: { ScriptBaseUrl?: string };
-            DracoCompression?: {
-                Configuration?: {
-                    decoder?: {
-                        wasmUrl?: string;
-                        wasmBinaryUrl?: string;
-                        fallbackUrl?: string;
-                    };
-                };
-            };
-        };
-
-        if (bjs.Tools) {
-            bjs.Tools.ScriptBaseUrl = 'https://cdn.babylonjs.com';
-        }
-
-        const decoder = bjs.DracoCompression?.Configuration?.decoder;
-        if (decoder) {
-            decoder.wasmUrl = 'https://cdn.babylonjs.com/draco_wasm_wrapper_gltf.js';
-            decoder.wasmBinaryUrl = 'https://cdn.babylonjs.com/draco_decoder_gltf.wasm';
-            decoder.fallbackUrl = 'https://cdn.babylonjs.com/draco_decoder_gltf.js';
-        }
+    if (bjs.Tools) {
+      bjs.Tools.ScriptBaseUrl = 'https://cdn.babylonjs.com';
     }
 
-    // Mirror Playground runtime behavior: resolve HK from global HavokPhysics factory.
-    if (typeof g.HavokPhysics !== 'function') {
-        throw new Error('HavokPhysics global is missing. Ensure HavokPhysics_umd.js is loaded before main.ts.');
+    const decoder = bjs.DracoCompression?.Configuration?.decoder;
+    if (decoder) {
+      decoder.wasmUrl = 'https://cdn.babylonjs.com/draco_wasm_wrapper_gltf.js';
+      decoder.wasmBinaryUrl = 'https://cdn.babylonjs.com/draco_decoder_gltf.wasm';
+      decoder.fallbackUrl = 'https://cdn.babylonjs.com/draco_decoder_gltf.js';
     }
+  }
 
-    if (typeof g.HK === 'undefined') {
-        g.HK = await g.HavokPhysics();
-    }
+  // Mirror Playground runtime behavior: resolve HK from global HavokPhysics factory.
+  if (typeof g.HavokPhysics !== 'function') {
+    throw new Error(
+      'HavokPhysics global is missing. Ensure HavokPhysics_umd.js is loaded before main.ts.'
+    );
+  }
 
-    if (!g.__babylonAudioEngine) {
-        const audioEngine = await CreateAudioEngineAsync({
-            volume: 1,
-            listenerEnabled: true,
-            listenerAutoUpdate: true
-        });
-        g.__babylonAudioEngine = audioEngine;
-    }
+  if (typeof g.HK === 'undefined') {
+    g.HK = await g.HavokPhysics();
+  }
+
+  if (!g.__babylonAudioEngine) {
+    const audioEngine = await CreateAudioEngineAsync({
+      volume: 1,
+      listenerEnabled: true,
+      listenerAutoUpdate: true
+    });
+    g.__babylonAudioEngine = audioEngine;
+  }
 }
 
 /**
  * Initializes the application
  */
 async function initialize(): Promise<void> {
-    try {
-        console.log('[Main] Initializing Babylon Game Starter...');
+  try {
+    console.log('[Main] Initializing Babylon Game Starter...');
 
-        // Get canvas element
-        const canvasElement = document.getElementById('renderCanvas');
-        if (!(canvasElement instanceof HTMLCanvasElement)) {
-            throw new Error('Canvas element not found');
-        }
-        const canvas = canvasElement;
-
-        console.log('[Main] Canvas found');
-
-        // Create engine
-        engine = new BABYLON.Engine(canvas, true, {
-            antialias: true,
-            powerPreference: 'high-performance'
-        });
-
-        console.log('[Main] Engine created');
-
-        await initializeRuntimeGlobals();
-
-        // Create scene using Playground
-        console.log('[Main] Creating scene from Playground...');
-        scene = Playground.CreateScene(engine, canvas);
-        console.log('[Main] Scene created successfully');
-
-        // Setup render loop
-        setupRenderLoop();
-
-        // Hide loading screen
-        hideLoadingScreen();
-
-        console.log('[Main] Initialization complete');
-
-    } catch (error) {
-        console.error('[Main] Initialization failed:', error);
-        displayError(error instanceof Error ? error.message : String(error));
+    // Get canvas element
+    const canvasElement = document.getElementById('renderCanvas');
+    if (!(canvasElement instanceof HTMLCanvasElement)) {
+      throw new Error('Canvas element not found');
     }
+    const canvas = canvasElement;
+
+    console.log('[Main] Canvas found');
+
+    // Create engine
+    engine = new BABYLON.Engine(canvas, true, {
+      antialias: true,
+      powerPreference: 'high-performance'
+    });
+
+    console.log('[Main] Engine created');
+
+    await initializeRuntimeGlobals();
+
+    // Create scene using Playground
+    console.log('[Main] Creating scene from Playground...');
+    scene = Playground.CreateScene(engine, canvas);
+    console.log('[Main] Scene created successfully');
+
+    // Setup render loop
+    setupRenderLoop();
+
+    // Hide loading screen
+    hideLoadingScreen();
+
+    console.log('[Main] Initialization complete');
+  } catch (error) {
+    console.error('[Main] Initialization failed:', error);
+    displayError(error instanceof Error ? error.message : String(error));
+  }
 }
 
 /**
  * Sets up the render loop
  */
 function setupRenderLoop(): void {
-    if (!engine || !scene) {
-        return;
-    }
+  if (!engine || !scene) {
+    return;
+  }
 
-    engine.runRenderLoop(() => {
-        scene?.render();
-    });
+  engine.runRenderLoop(() => {
+    scene?.render();
+  });
 
-    // Handle window resize
-    window.addEventListener('resize', () => {
-        engine?.resize();
-    });
+  // Handle window resize
+  window.addEventListener('resize', () => {
+    engine?.resize();
+  });
 }
 
 /**
  * Hides the loading screen
  */
 function hideLoadingScreen(): void {
-    const loadingScreen = document.getElementById('loadingScreen');
-    if (loadingScreen && !loadingScreen.classList.contains('hidden')) {
-        console.log('[Main] Hiding loading screen');
-        loadingScreen.classList.add('hidden');
-    }
+  const loadingScreen = document.getElementById('loadingScreen');
+  if (loadingScreen && !loadingScreen.classList.contains('hidden')) {
+    console.log('[Main] Hiding loading screen');
+    loadingScreen.classList.add('hidden');
+  }
 }
 
 /**
@@ -159,8 +167,8 @@ function hideLoadingScreen(): void {
  * @param message - Error message to display
  */
 function displayError(message: string): void {
-    const errorElement = document.createElement('div');
-    errorElement.style.cssText = `
+  const errorElement = document.createElement('div');
+  errorElement.style.cssText = `
         position: fixed;
         top: 20px;
         left: 20px;
@@ -174,38 +182,40 @@ function displayError(message: string): void {
         font-family: monospace;
         font-size: 14px;
     `;
-    errorElement.textContent = `Error: ${message}`;
-    document.body.appendChild(errorElement);
+  errorElement.textContent = `Error: ${message}`;
+  document.body.appendChild(errorElement);
 
-    setTimeout(() => {
-        errorElement.remove();
-    }, 5000);
+  setTimeout(() => {
+    errorElement.remove();
+  }, 5000);
 }
 
 /**
  * Cleanup on page unload
  */
 window.addEventListener('beforeunload', () => {
-    if (scene) {
-        scene.dispose();
-    }
-    if (engine) {
-        engine.dispose();
-    }
+  if (scene) {
+    scene.dispose();
+  }
+  if (engine) {
+    engine.dispose();
+  }
 });
 
 // Expose to window for debugging
 window.__babylon = {
-    BABYLON,
-    engine: () => engine,
-    scene: () => scene
+  BABYLON,
+  engine: () => engine,
+  scene: () => scene
 };
 
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initialize);
+  document.addEventListener('DOMContentLoaded', () => {
+    void initialize();
+  });
 } else {
-    initialize();
+  void initialize();
 }
 
 console.log('[Main] Module loaded, ready to initialize');
