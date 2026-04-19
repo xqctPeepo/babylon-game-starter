@@ -11,6 +11,8 @@ This project aims to follow:
 
 Tooling (**Prettier**, **TypeScript** `strict` options, **ESLint** with `typescript-eslint` type-aware presets) is the enforcement layer. `npm run format:check`, `npm run lint`, and `npm run typecheck` **MUST** pass on the default branch and in CI.
 
+Prettier is configured in `package.json` to format **`src/**/*.ts`**, **`eslint.config.js`**, and **`vite.config.ts`** (see `format` / `format:check` scripts).
+
 ## Filename axis (dual guide resolution)
 
 Basarat recommends **camelCase** source file names; Google requires **snake_case** module file names. Both cannot be satisfied literally for the same tree.
