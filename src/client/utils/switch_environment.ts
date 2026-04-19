@@ -22,27 +22,15 @@ export async function switchToEnvironment(environmentName: string): Promise<void
     return; // Silently ignore empty environment names
   }
 
-  // Find the target environment
-  console.log('[switchToEnvironment] Looking for environment:', environmentName);
   const foundEnv = ASSETS.ENVIRONMENTS.find((env) => env.name === environmentName);
   if (!foundEnv) {
-    console.log('[switchToEnvironment] Environment not found');
     await SettingsUI.changeEnvironment(environmentName);
     return;
   }
 
-  console.log('[switchToEnvironment] Found environment:', foundEnv.name);
-  console.log('[switchToEnvironment] Environment keys:', Object.keys(foundEnv));
-  console.log('[switchToEnvironment] Full environment object:', foundEnv);
-
   // Check if environment has a cutscene and play it before switching
   // Use bracket notation to access optional property (bypasses TypeScript union type issues from satisfies)
   const cutSceneProperty = foundEnv.cutScene;
-  console.log('[switchToEnvironment] Cutscene property (bracket):', cutSceneProperty);
-
-  // Also check using 'in' operator to see if property exists
-  const hasCutSceneProperty = 'cutScene' in foundEnv;
-  console.log('[switchToEnvironment] Has cutScene property (in operator):', hasCutSceneProperty);
   if (cutSceneProperty) {
     const cutSceneData = cutSceneProperty;
 
@@ -79,7 +67,6 @@ export async function switchToEnvironment(environmentName: string): Promise<void
           };
           // Play cutscene - ensure it completes before environment switch
           // Continue even if cutscene fails to prevent blocking environment switch
-          console.log('[switchToEnvironment] Playing cutscene:', cutScene);
           try {
             await CutSceneManager.playCutScene(scene, cutScene);
           } catch {

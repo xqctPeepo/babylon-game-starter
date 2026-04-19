@@ -6,13 +6,28 @@ const META_ENV = 'babylon_game_starter_perfEnv';
 const META_CHARACTER = 'babylon_game_starter_perfCharacter';
 const META_AT = 'babylon_game_starter_perfAt';
 
-let deferredScenePerfDevLogFlush: ((scene: BABYLON.Scene) => void) | undefined;
+/** Values merged into `scene.metadata` for dev perf logging. */
+export interface StampScenePerfConsoleContextOptions {
+  readonly environmentName?: string;
+  readonly characterName?: string;
+  readonly loggedAtIso?: string;
+}
+
+/** Snapshot read back from `scene.metadata` for `__babylon.logSceneStats()`. */
+export interface ScenePerfConsoleContext {
+  readonly environmentName: string;
+  readonly characterName: string;
+}
+
+export type DeferredScenePerfDevLogFlush = (scene: BABYLON.Scene) => void;
+
+let deferredScenePerfDevLogFlush: DeferredScenePerfDevLogFlush | undefined;
 
 /**
  * SceneManager registers this so the first dev [ScenePerf] line can wait until
  * the playable character exists (env load completes before loadCharacterModel in index.ts).
  */
-export function registerDeferredScenePerfDevLogFlush(fn: (scene: BABYLON.Scene) => void): void {
+export function registerDeferredScenePerfDevLogFlush(fn: DeferredScenePerfDevLogFlush): void {
   deferredScenePerfDevLogFlush = fn;
 }
 
@@ -22,11 +37,7 @@ export function tryFlushDeferredScenePerfDevLog(scene: BABYLON.Scene): void {
 
 export function stampScenePerfConsoleContext(
   scene: BABYLON.Scene,
-  options: {
-    readonly environmentName?: string;
-    readonly characterName?: string;
-    readonly loggedAtIso?: string;
-  }
+  options: StampScenePerfConsoleContextOptions
 ): void {
   const prev = scene.metadata;
   const bag =
@@ -45,10 +56,7 @@ export function stampScenePerfConsoleContext(
   scene.metadata = bag;
 }
 
-export function readScenePerfConsoleContext(scene: BABYLON.Scene): {
-  readonly environmentName: string;
-  readonly characterName: string;
-} {
+export function readScenePerfConsoleContext(scene: BABYLON.Scene): ScenePerfConsoleContext {
   const meta = scene.metadata;
   let environmentName = '(unknown)';
   let characterName = '(unknown)';

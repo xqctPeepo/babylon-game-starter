@@ -9,14 +9,14 @@ import {
   SceneOptimizer,
   SceneOptimizerOptions
 } from '@babylonjs/core/Misc/sceneOptimizer';
-import { ScenePerformancePriority, type Scene as CoreScene } from '@babylonjs/core/scene';
+import { ScenePerformancePriority } from '@babylonjs/core/scene';
 
 import { ASSETS } from '../config/assets';
 import { CONFIG } from '../config/game_config';
 import { CharacterController } from '../controllers/character_controller';
 import { SmoothFollowCameraController } from '../controllers/smooth_follow_camera_controller';
 import { OBJECT_ROLE } from '../types/environment';
-import { devLog } from '../utils/dev_log';
+import { devLog, isViteDev } from '../utils/dev_log';
 import {
   registerDeferredScenePerfDevLogFlush,
   stampScenePerfConsoleContext
@@ -63,7 +63,7 @@ export class SceneManager {
   // Default light tracking
   private defaultLight: BABYLON.HemisphericLight | null = null;
 
-  private sceneOptimizer: SceneOptimizer | null = null;
+  private sceneOptimizer: InstanceType<typeof SceneOptimizer> | null = null;
   private sceneOptimizerStarted = false;
 
   /** When true, dev [ScenePerf] was skipped until CharacterLoader sets a playable character. */
@@ -437,15 +437,19 @@ export class SceneManager {
       opts.addOptimization(
         new HardwareScalingOptimization(0, perf.HARDWARE_SCALING_MAX, perf.HARDWARE_SCALING_STEP)
       );
-      this.sceneOptimizer = SceneOptimizer.OptimizeAsync(this.scene as unknown as CoreScene, opts);
+      // Playground typings do not expose a stable `Scene` import; runtime `BABYLON.Scene` matches `SceneOptimizer`.
+      this.sceneOptimizer = SceneOptimizer.OptimizeAsync(
+        this.scene as unknown as Parameters<typeof SceneOptimizer.OptimizeAsync>[0],
+        opts
+      );
     }
 
-    if (import.meta.env.DEV) {
+    if (isViteDev()) {
       const loggedAtIso = new Date().toISOString();
       const characterName = CharacterLoader.getCurrentCharacterName();
       if (!characterName) {
-        // Initial boot: index.ts loads the environment first, then loadCharacterModel — avoid
-        // character="(none)" in the console; emit [ScenePerf] when the character stamps.
+        // Initial boot: index.ts loads the environment first, then loadCharacterModel. Defer
+        // [ScenePerf] until CharacterLoader stamps a name so the console never shows character="(none)".
         this.scenePerfDevLogDeferred = true;
         stampScenePerfConsoleContext(this.scene, {
           environmentName: this.currentEnvironment,

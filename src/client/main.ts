@@ -14,7 +14,7 @@ import { CreateAudioEngineAsync } from '@babylonjs/core/AudioV2/webAudio/webAudi
 import * as PhysicsV2 from '@babylonjs/core/Physics/v2/index';
 
 import { CONFIG } from './config/game_config';
-import { devLog } from './utils/dev_log';
+import { devLog, isViteDev } from './utils/dev_log';
 import { readScenePerfConsoleContext } from './utils/scene_perf_console_stamp';
 import {
   collectScenePerformanceStats,
@@ -28,7 +28,7 @@ let engine: BABYLON.Engine | null = null;
 let scene: BABYLON.Scene | null = null;
 
 async function loadInspectorIfDev(): Promise<void> {
-  if (import.meta.env.DEV) {
+  if (isViteDev()) {
     await import('@babylonjs/inspector');
   }
 }
