@@ -4,10 +4,7 @@
 
 import { ASSETS } from '../config/assets';
 import { CONFIG } from '../config/game_config';
-import {
-  meshRotationToWireQuaternion,
-  toMultiplayerAnimationStateToken
-} from '../utils/multiplayer_serialization';
+import { yawRadiansToWireQuaternion, toMultiplayerAnimationStateToken } from '../utils/multiplayer_serialization';
 
 import {
   coerceCharacterState,
@@ -73,7 +70,7 @@ function sampleLocalState(
     environmentName: environmentName.trim(),
     characterModelId,
     position: vec3FromMesh(mesh),
-    rotation: meshRotationToWireQuaternion(mesh),
+    rotation: yawRadiansToWireQuaternion(ctrl.getFacingYawRadians()),
     velocity: vel3(ctrl),
     animationState: toMultiplayerAnimationStateToken(ctrl.getCurrentState()),
     animationFrame: ctrl.animationController.getNormalizedPlaybackPhase(),

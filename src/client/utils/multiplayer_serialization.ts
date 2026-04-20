@@ -81,6 +81,16 @@ export function meshRotationToWireQuaternion(mesh: BABYLON.AbstractMesh): Quater
 }
 
 /**
+ * Locomotion-facing yaw only — matches `CharacterController` capsule bearing.
+ * Prefer this for multiplayer wire rotation so we never ship baked GLB root quaternions or
+ * animation-posture drift from `playerMesh` after locomotion clips run.
+ */
+export function yawRadiansToWireQuaternion(yawRadians: number): QuaternionSerializable {
+  const q = BABYLON.Quaternion.FromEulerAngles(0, yawRadians, 0);
+  return normalizeQuaternion(serializeQuaternion(q));
+}
+
+/**
  * Spherical linear interpolation between two quaternions
  */
 export function slerpQuaternion(

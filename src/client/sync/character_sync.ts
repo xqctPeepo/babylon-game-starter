@@ -4,13 +4,13 @@
 
 import {
   deserializeQuaternion,
-  meshRotationToWireQuaternion,
   serializeVector3,
   ThrottledFunction,
   hasSignificantVector3Change,
   hasSignificantQuaternionChange,
   hasSignificantNumberChange,
-  toMultiplayerAnimationStateToken
+  toMultiplayerAnimationStateToken,
+  yawRadiansToWireQuaternion
 } from '../utils/multiplayer_serialization';
 
 import type { CharacterController } from '../controllers/character_controller';
@@ -71,7 +71,7 @@ export class CharacterSync {
       environmentName: environmentName.trim(),
       characterModelId,
       position: serializeVector3(mesh.position),
-      rotation: meshRotationToWireQuaternion(mesh),
+      rotation: yawRadiansToWireQuaternion(this.characterController.getFacingYawRadians()),
       velocity: serializeVector3(this.characterController.getVelocity()),
       animationState: toMultiplayerAnimationStateToken(this.characterController.getCurrentState()),
       animationFrame: this.characterController.animationController.getNormalizedPlaybackPhase(),

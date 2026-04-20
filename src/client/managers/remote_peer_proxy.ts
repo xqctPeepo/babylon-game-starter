@@ -17,6 +17,8 @@ const REMOTE_ROOT_PREFIX = 'mp-remote-';
 
 interface PeerEntry {
   readonly root: BABYLON.TransformNode;
+  /** GLB root or fallback box — drives facing like local `playerMesh` (not `entry.root`). */
+  visualRootMesh: BABYLON.AbstractMesh | null;
   modelId: string;
   loadSeq: number;
   particleSystem: BABYLON.IParticleSystem | null;
@@ -41,6 +43,7 @@ function sameEnvironment(remote: string, local: string): boolean {
 }
 
 function disposePreviousVisuals(entry: PeerEntry): void {
+  entry.visualRootMesh = null;
   entry.lastAnimationToken = '';
   for (const g of entry.remoteAnimationGroups) {
     g.dispose();
@@ -57,7 +60,8 @@ function disposePreviousVisuals(entry: PeerEntry): void {
   }
 }
 
-function createFallbackBox(parent: BABYLON.TransformNode, clientId: string): void {
+function createFallbackBox(entry: PeerEntry, clientId: string): void {
+  const parent = entry.root;
   const box = BABYLON.MeshBuilder.CreateBox(
     `${REMOTE_ROOT_PREFIX}fallback-${clientId}`,
     { height: 1.2, width: 0.7, depth: 0.5 },
@@ -69,6 +73,7 @@ function createFallbackBox(parent: BABYLON.TransformNode, clientId: string): voi
   mat.emissiveColor = new BABYLON.Color3(0.15, 0.05, 0.1);
   box.material = mat;
   box.isPickable = false;
+  entry.visualRootMesh = box;
 }
 
 /** Shows or hides GLB + particles; stops animations/particles when hidden. */
@@ -130,6 +135,8 @@ async function importRemoteCharacter(
 ): Promise<void> {
   disposePreviousVisuals(entry);
 
+  NodeMaterialManager.initialize(scene);
+
   const result = await BABYLON.ImportMeshAsync(character.model, scene);
   if (token !== entry.loadSeq) {
     result.meshes.forEach((m) => {
@@ -142,19 +149,29 @@ async function importRemoteCharacter(
   }
 
   await NodeMaterialManager.processImportResult(result);
+  await scene.whenReadyAsync();
 
-  const rootMesh = result.meshes.find((mesh) => !mesh.parent) ?? result.meshes[0] ?? null;
+  /** Same root pick as {@link CharacterLoader.loadCharacter} (`meshes[0]`). */
+  const rootMesh = result.meshes[0] ?? result.meshes.find((mesh) => !mesh.parent) ?? null;
   if (!rootMesh) {
-    createFallbackBox(entry.root, clientId);
+    createFallbackBox(entry, clientId);
     applyPeerVisualLayer(entry);
     return;
   }
 
   rootMesh.name = `${REMOTE_ROOT_PREFIX}model-${clientId}`;
-  rootMesh.parent = entry.root;
+  /** Match {@link CharacterLoader}: asset scale on every mesh, then visual-root-only {@link CONFIG.ANIMATION.PLAYER_SCALE}. */
   result.meshes.forEach((mesh) => {
     mesh.scaling.setAll(character.scale);
   });
+  rootMesh.parent = entry.root;
+  rootMesh.scaling.setAll(CONFIG.ANIMATION.PLAYER_SCALE);
+
+  entry.visualRootMesh = rootMesh;
+  if (entry.lastState) {
+    rootMesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
+    rootMesh.rotationQuaternion.copyFrom(deserializeQuaternion(entry.lastState.rotation));
+  }
 
   entry.remoteAnimationGroups = result.animationGroups.slice();
 
@@ -201,7 +218,7 @@ async function scheduleModelLoad(
       return;
     }
     disposePreviousVisuals(entry);
-    createFallbackBox(entry.root, clientId);
+    createFallbackBox(entry, clientId);
     applyPeerVisualLayer(entry);
     return;
   }
@@ -213,7 +230,7 @@ async function scheduleModelLoad(
       return;
     }
     disposePreviousVisuals(entry);
-    createFallbackBox(entry.root, clientId);
+    createFallbackBox(entry, clientId);
     applyPeerVisualLayer(entry);
   }
 }
@@ -227,6 +244,7 @@ function ensurePeerRoot(scene: BABYLON.Scene, clientId: string): PeerEntry {
   root.setEnabled(false);
   entry = {
     root,
+    visualRootMesh: null,
     modelId: '',
     loadSeq: 0,
     particleSystem: null,
@@ -391,8 +409,12 @@ export function applyRemotePeerState(
     clampCoordComponent(state.position[1]),
     clampCoordComponent(state.position[2])
   );
+  /** World position only on parent — facing matches local `playerMesh` (yaw on visual root, not bind × parent). */
   entry.root.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
-  entry.root.rotationQuaternion.copyFrom(deserializeQuaternion(state.rotation));
+  entry.root.rotationQuaternion.copyFromFloats(0, 0, 0, 1);
+  const rotTarget = entry.visualRootMesh ?? entry.root;
+  rotTarget.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
+  rotTarget.rotationQuaternion.copyFrom(deserializeQuaternion(state.rotation));
 
   entry.desiredBoost = state.isBoosting;
 

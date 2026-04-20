@@ -839,6 +839,14 @@ export class CharacterController {
     return this.playerMesh;
   }
 
+  /**
+   * Horizontal facing used for movement / camera alignment (degrees of freedom on `displayCapsule`).
+   * Use for multiplayer rotation — independent of skeletal animation euler/quaternion drift on `playerMesh`.
+   */
+  public getFacingYawRadians(): number {
+    return this.displayCapsule.rotation.y;
+  }
+
   public getPhysicsCharacterController(): BABYLON.PhysicsCharacterController {
     return this.characterController;
   }
