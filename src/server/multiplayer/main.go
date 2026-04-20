@@ -30,6 +30,10 @@ type MultiplayerServer struct {
 	sessionIDToClientID map[string]string                             // For SSE auth
 	sseSessions         map[string]*datastar.ServerSentEventGenerator // Track active SSE sessions
 	sseMu               sync.RWMutex
+	// Last synchronizer item/world PATCH body (full snapshot for late joiners).
+	lastItemState map[string]interface{}
+	// Last known pose per clientId (merged from character-state PATCHes).
+	lastCharacterStates map[string]interface{}
 }
 
 // NewMultiplayerServer creates a new multiplayer server
@@ -40,6 +44,7 @@ func NewMultiplayerServer(maxClients int) *MultiplayerServer {
 		maxClients:          maxClients,
 		sessionIDToClientID: make(map[string]string),
 		sseSessions:         make(map[string]*datastar.ServerSentEventGenerator),
+		lastCharacterStates: make(map[string]interface{}),
 	}
 }
 
@@ -100,6 +105,28 @@ func (ms *MultiplayerServer) broadcastToAll(signalName string, payload interface
 	}
 
 	log.Printf("[Broadcast] Signal %s sent to %d clients", signalName, len(sessions))
+	return nil
+}
+
+// sendToSession delivers one patch-signal to a single SSE connection (e.g. full snapshot on connect).
+func (ms *MultiplayerServer) sendToSession(sessionID string, signalName string, payload interface{}) error {
+	if payload == nil {
+		return nil
+	}
+
+	ms.sseMu.RLock()
+	sse := ms.sseSessions[sessionID]
+	ms.sseMu.RUnlock()
+
+	if sse == nil || sse.IsClosed() {
+		return nil
+	}
+
+	if err := sse.MarshalAndPatchSignals(multiplayerSignalPatch(signalName, payload)); err != nil {
+		log.Printf("[Snapshot] Failed %s for session %s: %v", signalName, sessionID, err)
+		return err
+	}
+	log.Printf("[Snapshot] Sent %s to session %s", signalName, sessionID)
 	return nil
 }
 

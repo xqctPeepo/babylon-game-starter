@@ -153,7 +153,7 @@ func (ms *MultiplayerServer) handleHealth(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleCharacterStateUpdate processes character state updates from synchronizer
+// handleCharacterStateUpdate processes character state updates from each owning client (X-Client-ID).
 func (ms *MultiplayerServer) handleCharacterStateUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -173,10 +173,9 @@ func (ms *MultiplayerServer) handleCharacterStateUpdate(w http.ResponseWriter, r
 		return
 	}
 
-	log.Printf("[CharacterState] Update received: %v", update)
+	ms.mergeCharacterSnapshot(update)
 
-	// Validate state update (security/constraints)
-	// TODO: Implement validation
+	log.Printf("[CharacterState] Update received: %v", update)
 
 	// Broadcast to all clients
 	ms.broadcastToAll("character-state-update", update)
@@ -205,6 +204,10 @@ func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *htt
 	}
 
 	log.Printf("[ItemState] Update received: %v", update)
+
+	ms.mu.Lock()
+	ms.lastItemState = update
+	ms.mu.Unlock()
 
 	ms.broadcastToAll("item-state-update", update)
 
@@ -330,6 +333,10 @@ func (ms *MultiplayerServer) verifyCharacterPoseSender(r *http.Request, payload 
 		if !ok || cid != sender {
 			return false
 		}
+		mid, ok := um["characterModelId"].(string)
+		if !ok || strings.TrimSpace(mid) == "" {
+			return false
+		}
 	}
 	return true
 }
@@ -352,6 +359,7 @@ func (ms *MultiplayerServer) removeClient(clientID string) {
 
 	wasSynchronizer = client.IsSynchronizer
 	delete(ms.clients, clientID)
+	delete(ms.lastCharacterStates, clientID)
 	for i, id := range ms.clientOrder {
 		if id == clientID {
 			ms.clientOrder = append(ms.clientOrder[:i], ms.clientOrder[i+1:]...)
@@ -390,6 +398,52 @@ func (ms *MultiplayerServer) removeClient(clientID string) {
 		"totalClients": remaining,
 		"timestamp":    time.Now().UnixMilli(),
 	})
+}
+
+// mergeCharacterSnapshot updates per-client pose cache used for late-join SSE snapshots.
+func (ms *MultiplayerServer) mergeCharacterSnapshot(update map[string]interface{}) {
+	rawUpdates, ok := update["updates"].([]interface{})
+	if !ok {
+		return
+	}
+
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+
+	for _, u := range rawUpdates {
+		um, ok := u.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cid, ok := um["clientId"].(string)
+		if !ok || cid == "" {
+			continue
+		}
+		ms.lastCharacterStates[cid] = um
+	}
+}
+
+// pushSnapshotToSession sends the latest item/world and character poses to one new SSE session.
+func (ms *MultiplayerServer) pushSnapshotToSession(sessionID string) {
+	ms.mu.RLock()
+	itemSnap := ms.lastItemState
+	charSnaps := make([]interface{}, 0, len(ms.lastCharacterStates))
+	for cid, v := range ms.lastCharacterStates {
+		if _, stillHere := ms.clients[cid]; stillHere {
+			charSnaps = append(charSnaps, v)
+		}
+	}
+	ms.mu.RUnlock()
+
+	if itemSnap != nil {
+		_ = ms.sendToSession(sessionID, "item-state-update", itemSnap)
+	}
+	if len(charSnaps) > 0 {
+		_ = ms.sendToSession(sessionID, "character-state-update", map[string]interface{}{
+			"updates":   charSnaps,
+			"timestamp": time.Now().UnixMilli(),
+		})
+	}
 }
 
 // handleSSE manages Datastar SSE connections for real-time signal broadcasting
@@ -433,6 +487,8 @@ func (ms *MultiplayerServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	sse := datastar.NewSSE(w, r)
 	ms.registerSSESession(sessionID, sse)
+
+	ms.pushSnapshotToSession(sessionID)
 
 	ms.mu.RLock()
 	total := len(ms.clients)

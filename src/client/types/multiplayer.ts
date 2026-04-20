@@ -8,6 +8,11 @@
 export type Vector3Serializable = [number, number, number];
 
 /**
+ * Serializable unit quaternion [x, y, z, w] — **only** wire format for rotation in multiplayer payloads.
+ */
+export type QuaternionSerializable = [number, number, number, number];
+
+/**
  * Serializable Color3/Color4 as [r, g, b] or [r, g, b, a]
  */
 export type ColorSerializable = [number, number, number] | [number, number, number, number];
@@ -41,16 +46,23 @@ export interface JoinResponse {
 
 export interface CharacterState {
   readonly clientId: string;
+  /** `ASSETS.ENVIRONMENTS[].name` for the peer’s loaded scene; must match viewer’s env to show proxies. */
+  readonly environmentName: string;
+  /** Stable asset key for the loaded character (e.g. ASSETS.CHARACTERS[].name); BGS-MP-SYNC §5.1.1 */
+  readonly characterModelId: string;
   readonly position: Vector3Serializable;
-  readonly rotation: Vector3Serializable; // [x, y, z] in radians
+  readonly rotation: QuaternionSerializable;
   readonly velocity: Vector3Serializable;
-  readonly animationState: string; // idle|walk|run|jump|fall
-  readonly animationFrame: number; // 0-1 normalized
+  /** Semantic locomotion token: idle | walk | run | jump | fall (BGS-MP-SYNC §5.1.1) */
+  readonly animationState: string;
+  /** Normalized playback phase in [0, 1] for the active clip (BGS-MP-SYNC §5.1.1) */
+  readonly animationFrame: number;
   readonly isJumping: boolean;
   readonly isBoosting: boolean;
   readonly boostType?: 'superJump' | 'invisibility';
+  /** Milliseconds remaining for timed boost effects; 0 when inactive (BGS-MP-SYNC §5.1.1) */
   readonly boostTimeRemaining: number; // ms
-  readonly timestamp: number; // server unix ms
+  readonly timestamp: number; // client sample time, unix ms
 }
 
 // ============================================================================
@@ -61,7 +73,7 @@ export interface ItemInstanceState {
   readonly instanceId: string;
   readonly itemName: string;
   readonly position: Vector3Serializable;
-  readonly rotation: Vector3Serializable;
+  readonly rotation: QuaternionSerializable;
   readonly velocity: Vector3Serializable;
   readonly isCollected: boolean;
   readonly collectedByClientId?: string;

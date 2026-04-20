@@ -2,16 +2,24 @@
 // CHARACTER STATE SYNC MODULE
 // ============================================================================
 
-import type BABYLON from '@babylonjs/core';
-import type { CharacterController } from '../controllers/character_controller';
-import type { CharacterState, CharacterStateUpdate, Vector3Serializable } from '../types/multiplayer';
 import {
+  deserializeQuaternion,
+  meshRotationToWireQuaternion,
   serializeVector3,
   ThrottledFunction,
   hasSignificantVector3Change,
-  hasSignificantAngleChange,
-  hasSignificantNumberChange
+  hasSignificantQuaternionChange,
+  hasSignificantNumberChange,
+  toMultiplayerAnimationStateToken
 } from '../utils/multiplayer_serialization';
+
+import type { CharacterController } from '../controllers/character_controller';
+import type {
+  CharacterState,
+  CharacterStateUpdate,
+  QuaternionSerializable,
+  Vector3Serializable
+} from '../types/multiplayer';
 
 /**
  * Tracks and detects character state changes for synchronization
@@ -36,8 +44,9 @@ export class CharacterSync {
 
   /**
    * Samples current character state and detects changes
+   * @param environmentName Current `ASSETS.ENVIRONMENTS[].name` (viewer routing for remote proxies).
    */
-  public sampleState(timestamp: number): CharacterState | null {
+  public sampleState(timestamp: number, environmentName: string): CharacterState | null {
     if (!this.characterController) {
       return null;
     }
@@ -52,17 +61,26 @@ export class CharacterSync {
       return null;
     }
 
+    const characterModelId = this.characterController.getCharacterModelId().trim();
+    if (!characterModelId) {
+      return null;
+    }
+
     const state: CharacterState = {
       clientId: this.clientId,
+      environmentName: environmentName.trim(),
+      characterModelId,
       position: serializeVector3(mesh.position),
-      rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
-      velocity: serializeVector3(this.characterController.getVelocity?.() ?? BABYLON.Vector3.Zero()),
-      animationState: this.characterController.getCurrentState?.() ?? 'idle',
-      animationFrame: 0, // TODO: Get from animation group
-      isJumping: this.characterController.getVelocity?.()?.y > 0.1 ?? false,
-      isBoosting: this.characterController.getBoostStatus?.() !== 'Ready' ?? false,
+      rotation: meshRotationToWireQuaternion(mesh),
+      velocity: serializeVector3(this.characterController.getVelocity()),
+      animationState: toMultiplayerAnimationStateToken(this.characterController.getCurrentState()),
+      animationFrame: this.characterController.animationController.getNormalizedPlaybackPhase(),
+      isJumping: this.characterController.getVelocity().y > 0.1,
+      isBoosting:
+        this.characterController.isBoosting() ||
+        this.characterController.getBoostStatus() !== 'Ready',
       boostType: this.getBoostType(),
-      boostTimeRemaining: 0, // TODO: Track boost duration
+      boostTimeRemaining: this.characterController.getBoostTimeRemainingMs(),
       timestamp
     };
 
@@ -78,7 +96,10 @@ export class CharacterSync {
   /**
    * Gets batch of characters to sync (for other players)
    */
-  public createStateUpdate(timestamp: number, characterStates: CharacterState[]): CharacterStateUpdate {
+  public createStateUpdate(
+    timestamp: number,
+    characterStates: CharacterState[]
+  ): CharacterStateUpdate {
     return {
       updates: characterStates,
       timestamp
@@ -87,12 +108,12 @@ export class CharacterSync {
 
   /**
    * Applies received character state to remote mesh
-   * 
+   *
    * Applied properties:
    * - Position (direct assignment)
-   * - Rotation (Euler angles as [x, y, z] in radians)
+   * - Rotation (quaternion [x,y,z,w] wire format only)
    * - Velocity (stored for interpolation, not directly applied)
-   * 
+   *
    * NOTE: Animation state and physics velocity are handled by higher-level managers
    */
   public static applyRemoteCharacterState(
@@ -104,7 +125,7 @@ export class CharacterSync {
     // Apply position
     this.applyPosition(remoteMesh, state.position);
 
-    // Apply rotation from Euler angles
+    // Apply rotation (quaternions only)
     this.applyRotation(remoteMesh, state.rotation);
 
     // Store velocity for potential physics interpolation (not directly applied to mesh)
@@ -123,18 +144,12 @@ export class CharacterSync {
   }
 
   /**
-   * Applies rotation (Euler angles) to mesh
-   * Uses rotationQuaternion if available, falls back to rotation property
+   * Applies rotation quaternion to mesh
    */
-  private static applyRotation(mesh: BABYLON.AbstractMesh, euler: Vector3Serializable): void {
+  private static applyRotation(mesh: BABYLON.AbstractMesh, rotation: QuaternionSerializable): void {
     try {
-      // Prefer quaternion for better rotation interpolation
-      if (mesh.rotationQuaternion) {
-        const quat = BABYLON.Quaternion.FromEulerAngles(euler[0], euler[1], euler[2]);
-        mesh.rotationQuaternion.copyFrom(quat);
-      } else {
-        mesh.rotation.set(euler[0], euler[1], euler[2]);
-      }
+      mesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
+      mesh.rotationQuaternion.copyFrom(deserializeQuaternion(rotation));
     } catch (e) {
       console.warn('[CharacterSync] Failed to apply rotation:', e);
     }
@@ -149,12 +164,25 @@ export class CharacterSync {
     if (!last) return true;
 
     // Check position change (threshold: 0.1 units)
-    if (hasSignificantVector3Change(last.position as any, newState.position, 0.1)) {
+    if (
+      last.position !== undefined &&
+      hasSignificantVector3Change(last.position, newState.position, 0.1)
+    ) {
       return true;
     }
 
-    // Check rotation change (threshold: 0.05 radians)
-    if (hasSignificantAngleChange((last.rotation?.[1] ?? 0), newState.rotation[1], 0.05)) {
+    if (
+      last.rotation !== undefined &&
+      hasSignificantQuaternionChange(last.rotation, newState.rotation, 0.05)
+    ) {
+      return true;
+    }
+
+    if (last.characterModelId !== newState.characterModelId) {
+      return true;
+    }
+
+    if (last.environmentName !== newState.environmentName) {
       return true;
     }
 
@@ -163,8 +191,16 @@ export class CharacterSync {
       return true;
     }
 
+    if (hasSignificantNumberChange(last.animationFrame ?? 0, newState.animationFrame, 0.04)) {
+      return true;
+    }
+
     // Check jump/boost state change
     if (last.isJumping !== newState.isJumping || last.isBoosting !== newState.isBoosting) {
+      return true;
+    }
+
+    if (hasSignificantNumberChange(last.boostTimeRemaining ?? 0, newState.boostTimeRemaining, 40)) {
       return true;
     }
 

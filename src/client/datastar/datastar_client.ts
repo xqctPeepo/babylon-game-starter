@@ -4,39 +4,41 @@
 
 /**
  * Lightweight Datastar client wrapper for browser-based multiplayer sync.
- * 
+ *
  * This module provides:
  * - SSE (Server-Sent Events) connection management via EventSource
  * - Signal subscription/unsubscription
  * - PATCH request handling
  * - Automatic reconnection with exponential backoff
  * - Configurable server endpoints (production or local)
- * 
+ *
  * The Datastar way: server-sent `datastar-patch-signals` events (JSON from the Go SDK
  * `MarshalAndPatchSignals` patch-signals wire format). This client uses `EventSource` and dispatches by signal name.
  */
 
-export interface DatastarSignalListener<T = unknown> {
-  (data: T): void;
-}
+export type DatastarSignalListener<T = unknown> = (data: T) => void;
 
 export interface DatastarEventMap {
-  'connected': undefined;
-  'disconnected': undefined;
-  'error': Error;
+  connected: undefined;
+  disconnected: undefined;
+  error: Error;
 }
+
+/** Union of payloads for `connected` | `disconnected` | `error` lifecycle events */
+type DatastarLifecyclePayload = DatastarEventMap[keyof DatastarEventMap];
+type DatastarLifecycleListener = (payload: DatastarLifecyclePayload) => void;
 
 export class DatastarClient {
   private eventSource: EventSource | null = null;
   private sseUrl: string;
-  private signalListeners: Map<string, Set<DatastarSignalListener>> = new Map();
-  private eventListeners: Map<keyof DatastarEventMap, Set<Function>> = new Map();
+  private signalListeners = new Map<string, Set<DatastarSignalListener>>();
+  private eventListeners = new Map<keyof DatastarEventMap, Set<DatastarLifecycleListener>>();
   private messageIndex = 0;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelayMs = 1000;
   private isIntentionallyClosed = false;
-  private sessionID: string = '';
+  private sessionID = '';
 
   constructor(sseUrl: string) {
     this.sseUrl = sseUrl;
@@ -93,9 +95,9 @@ export class DatastarClient {
         connectionTimeout = setTimeout(() => {
           if (this.eventSource && this.eventSource.readyState === EventSource.CONNECTING) {
             this.eventSource.close();
-            finish(() =>
-              reject(new Error(`Connection timeout after ${effectiveMs}ms`))
-            );
+            finish(() => {
+              reject(new Error(`Connection timeout after ${effectiveMs}ms`));
+            });
           }
         }, effectiveMs);
 
@@ -109,9 +111,12 @@ export class DatastarClient {
         };
 
         // Official datastar-go wire format: event type datastar-patch-signals (see EventTypePatchSignals).
-        this.eventSource.addEventListener('datastar-patch-signals', (event: MessageEvent<string>) => {
-          this.handlePatchSignalsEvent(event.data);
-        });
+        this.eventSource.addEventListener(
+          'datastar-patch-signals',
+          (event: MessageEvent<string>) => {
+            this.handlePatchSignalsEvent(event.data);
+          }
+        );
 
         // Legacy/default SSE messages (optional fallback)
         this.eventSource.addEventListener('message', (event) => {
@@ -129,10 +134,15 @@ export class DatastarClient {
             this.attemptReconnect();
           }
           // Reject is a no-op if onopen already called finish (settled).
-          finish(() => reject(error));
+          finish(() => {
+            reject(error);
+          });
         };
       } catch (error) {
-        finish(() => reject(error));
+        const err = error instanceof Error ? error : new Error(String(error));
+        finish(() => {
+          reject(err);
+        });
       }
     });
   }
@@ -245,13 +255,14 @@ export class DatastarClient {
     if (!this.eventListeners.has(event)) {
       this.eventListeners.set(event, new Set());
     }
-    this.eventListeners.get(event)!.add(listener);
+    const stored = listener as DatastarLifecycleListener;
+    this.eventListeners.get(event)!.add(stored);
 
     // Return unsubscribe function
     return () => {
       const listeners = this.eventListeners.get(event);
       if (listeners) {
-        listeners.delete(listener);
+        listeners.delete(stored);
       }
     };
   }
@@ -315,14 +326,11 @@ export class DatastarClient {
     }
   }
 
-  private emit<K extends keyof DatastarEventMap>(
-    event: K,
-    data?: DatastarEventMap[K]
-  ): void {
+  private emit<K extends keyof DatastarEventMap>(event: K, data?: DatastarEventMap[K]): void {
     const listeners = this.eventListeners.get(event);
     if (listeners) {
       for (const listener of listeners) {
-        (listener as Function)(data);
+        listener(data);
       }
     }
   }
@@ -357,9 +365,7 @@ let globalDatastarClient: DatastarClient | null = null;
 let resolvedStreamUrlPromise: Promise<string> | null = null;
 
 function ensureMultiplayerStreamUrlResolved(): Promise<string> {
-  if (!resolvedStreamUrlPromise) {
-    resolvedStreamUrlPromise = determineMultiplayerUrl();
-  }
+  resolvedStreamUrlPromise ??= determineMultiplayerUrl();
   return resolvedStreamUrlPromise;
 }
 
@@ -450,7 +456,9 @@ async function attemptServerConnection(server: string, timeoutMs: number): Promi
 
     // Health check with timeout
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
 
     const response = await fetch(`${protocol}//${server}/api/multiplayer/health`, {
       signal: controller.signal,
@@ -491,7 +499,7 @@ export function getDatastarClient(): DatastarClient {
           console.log('[Datastar] SSE endpoint configured successfully');
         }
       })
-      .catch((error) => {
+      .catch((error: unknown) => {
         console.warn('[Datastar] Failed to determine multiplayer server:', error);
         console.warn('[Datastar] Multiplayer will not be available');
       });

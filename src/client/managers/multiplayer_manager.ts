@@ -2,12 +2,13 @@
 // MULTIPLAYER MANAGER - Client-side orchestration
 // ============================================================================
 
+import { CONFIG } from '../config/game_config';
 import {
   getDatastarClient,
   getMultiplayerHttpOrigin,
   type DatastarClient
 } from '../datastar/datastar_client';
-import { CONFIG } from '../config/game_config';
+
 import type {
   MultiplayerClientState,
   JoinResponse,
@@ -25,9 +26,11 @@ export interface MultiplayerManagerConfig {
   updateThrottleMs?: number;
 }
 
+type MultiplayerEmitHandler = (data?: unknown) => void;
+
 /**
  * Manages client-side multiplayer synchronization
- * 
+ *
  * Responsibilities:
  * - Join/leave multiplayer session
  * - Manage SSE connection via Datastar
@@ -36,18 +39,19 @@ export interface MultiplayerManagerConfig {
  */
 export class MultiplayerManager {
   private static instance: MultiplayerManager | null = null;
-  
+
   private clientState: MultiplayerClientState | null = null;
   /** Base `https://host:port` for REST calls (may differ from page origin when using VITE_MULTIPLAYER_HOST). */
   private mpHttpOrigin: string | null = null;
   private datastarClient: DatastarClient;
   private isConnected = false;
-  private listeners: Map<string, Set<Function>> = new Map();
+  private listeners = new Map<string, Set<MultiplayerEmitHandler>>();
 
   // Signal unsubscribers
-  private unsubscribers: Array<() => void> = [];
+  private unsubscribers: (() => void)[] = [];
 
-  constructor(_config?: MultiplayerManagerConfig) {
+  constructor(config?: MultiplayerManagerConfig) {
+    void config;
     this.datastarClient = getDatastarClient();
     this.setupEventListeners();
   }
@@ -56,9 +60,7 @@ export class MultiplayerManager {
    * Gets or creates the singleton instance
    */
   public static getInstance(config?: MultiplayerManagerConfig): MultiplayerManager {
-    if (!MultiplayerManager.instance) {
-      MultiplayerManager.instance = new MultiplayerManager(config);
-    }
+    MultiplayerManager.instance ??= new MultiplayerManager(config);
     return MultiplayerManager.instance;
   }
 
@@ -102,14 +104,11 @@ export class MultiplayerManager {
         character: characterName
       };
 
-      console.log(
-        `[MultiplayerManager] Joined successfully`,
-        {
-          clientId: this.clientState.clientId,
-          isSynchronizer: this.clientState.isSynchronizer,
-          existingClients: joinResponse.existing_clients
-        }
-      );
+      console.log(`[MultiplayerManager] Joined successfully`, {
+        clientId: this.clientState.clientId,
+        isSynchronizer: this.clientState.isSynchronizer,
+        existingClients: joinResponse.existing_clients
+      });
 
       // Connect to SSE endpoint
       await this.connectSSE(joinResponse.session_id);
@@ -348,7 +347,7 @@ export class MultiplayerManager {
       | 'synchronizer-changed'
       | 'client-joined'
       | 'client-left',
-    listener: Function
+    listener: MultiplayerEmitHandler
   ): () => void {
     if (!this.listeners.has(eventName)) {
       this.listeners.set(eventName, new Set());
@@ -392,43 +391,47 @@ export class MultiplayerManager {
     // Subscribe to state update signals
     const unsub1 = this.datastarClient.onSignal<CharacterStateUpdate>(
       'character-state-update',
-      (data) => this.emit('character-state-update', data)
+      (data) => {
+        this.emit('character-state-update', data);
+      }
     );
 
-    const unsub2 = this.datastarClient.onSignal<ItemStateUpdate>(
-      'item-state-update',
-      (data) => this.emit('item-state-update', data)
-    );
+    const unsub2 = this.datastarClient.onSignal<ItemStateUpdate>('item-state-update', (data) => {
+      this.emit('item-state-update', data);
+    });
 
     const unsub3 = this.datastarClient.onSignal<EffectStateUpdate>(
       'effects-state-update',
-      (data) => this.emit('effects-state-update', data)
+      (data) => {
+        this.emit('effects-state-update', data);
+      }
     );
 
-    const unsub4 = this.datastarClient.onSignal<LightStateUpdate>(
-      'lights-state-update',
-      (data) => this.emit('lights-state-update', data)
-    );
+    const unsub4 = this.datastarClient.onSignal<LightStateUpdate>('lights-state-update', (data) => {
+      this.emit('lights-state-update', data);
+    });
 
     const unsub5 = this.datastarClient.onSignal<SkyEffectStateUpdate>(
       'sky-effects-state-update',
-      (data) => this.emit('sky-effects-state-update', data)
+      (data) => {
+        this.emit('sky-effects-state-update', data);
+      }
     );
 
     const unsub6 = this.datastarClient.onSignal<SynchronizerChangedMessage>(
       'synchronizer-changed',
-      (data) => this.handleSynchronizerChanged(data)
+      (data) => {
+        this.handleSynchronizerChanged(data);
+      }
     );
 
-    const unsub7 = this.datastarClient.onSignal<ClientConnectionEvent>(
-      'client-joined',
-      (data) => this.emit('client-joined', data)
-    );
+    const unsub7 = this.datastarClient.onSignal<ClientConnectionEvent>('client-joined', (data) => {
+      this.emit('client-joined', data);
+    });
 
-    const unsub8 = this.datastarClient.onSignal<ClientConnectionEvent>(
-      'client-left',
-      (data) => this.emit('client-left', data)
-    );
+    const unsub8 = this.datastarClient.onSignal<ClientConnectionEvent>('client-left', (data) => {
+      this.emit('client-left', data);
+    });
 
     this.unsubscribers.push(unsub1, unsub2, unsub3, unsub4, unsub5, unsub6, unsub7, unsub8);
 

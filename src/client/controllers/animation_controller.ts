@@ -453,4 +453,27 @@ export class AnimationController {
   public isCurrentlyBlending(): boolean {
     return this.isBlending;
   }
+
+  /**
+   * Normalized phase [0, 1] of the active AnimationGroup clip (BGS-MP-SYNC §5.1.1).
+   */
+  public getNormalizedPlaybackPhase(): number {
+    const name = this.currentAnimation;
+    if (!name) {
+      return 0;
+    }
+    const group = this.scene.getAnimationGroupByName(name);
+    if (!group?.isPlaying || group.animatables.length === 0) {
+      return 0;
+    }
+    const animatable = group.animatables[0];
+    if (!animatable) {
+      return 0;
+    }
+    const from = animatable.fromFrame;
+    const to = animatable.toFrame;
+    const span = Math.max(to - from, 1e-9);
+    const mf = animatable.masterFrame;
+    return Math.min(1, Math.max(0, (mf - from) / span));
+  }
 }

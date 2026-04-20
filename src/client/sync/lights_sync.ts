@@ -2,15 +2,17 @@
 // LIGHTS STATE SYNC MODULE
 // ============================================================================
 
-import type BABYLON from '@babylonjs/core';
-import type { LightState, LightStateUpdate, Vector3Serializable } from '../types/multiplayer';
+import * as BABYLON from '@babylonjs/core';
+
 import { ThrottledFunction } from '../utils/multiplayer_serialization';
+
+import type { LightState, LightStateUpdate } from '../types/multiplayer';
 
 /**
  * Tracks and detects light state changes for synchronization
  */
 export class LightsSync {
-  private lights: Map<string, LightState> = new Map();
+  private lights = new Map<string, LightState>();
   private throttle: ThrottledFunction;
 
   constructor(throttleMs = 100) {
@@ -58,7 +60,7 @@ export class LightsSync {
 
   /**
    * Applies remote light state to mesh/light object
-   * 
+   *
    * Applied properties (type-specific):
    * - All types: intensity, isEnabled, diffuse/specular colors
    * - POINT: position, range

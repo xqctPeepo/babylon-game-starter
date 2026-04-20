@@ -29,7 +29,9 @@ class Playground {
   public static CreateScene(engine: BABYLON.Engine, canvas: HTMLCanvasElement): BABYLON.Scene {
     // Clean up any existing UI elements before creating new ones
     cleanupUI();
-    void getMultiplayerManager().leave().catch(() => {});
+    void getMultiplayerManager()
+      .leave()
+      .catch(() => undefined);
 
     const sceneManager = new SceneManager(engine, canvas);
 

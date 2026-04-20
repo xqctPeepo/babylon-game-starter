@@ -2,19 +2,20 @@
 // EFFECTS STATE SYNC MODULE
 // ============================================================================
 
+import { ThrottledFunction } from '../utils/multiplayer_serialization';
+
 import type {
   ParticleEffectState,
   EnvironmentParticleState,
   EffectStateUpdate
 } from '../types/multiplayer';
-import { ThrottledFunction } from '../utils/multiplayer_serialization';
 
 /**
  * Tracks and detects particle effect state changes for synchronization
  */
 export class EffectsSync {
-  private particleEffects: Map<string, ParticleEffectState> = new Map();
-  private environmentParticles: Map<string, EnvironmentParticleState> = new Map();
+  private particleEffects = new Map<string, ParticleEffectState>();
+  private environmentParticles = new Map<string, EnvironmentParticleState>();
   private throttle: ThrottledFunction;
 
   constructor(throttleMs = 100) {
@@ -63,9 +64,7 @@ export class EffectsSync {
 
     return {
       particleEffects:
-        this.particleEffects.size > 0
-          ? Array.from(this.particleEffects.values())
-          : undefined,
+        this.particleEffects.size > 0 ? Array.from(this.particleEffects.values()) : undefined,
       environmentParticles:
         this.environmentParticles.size > 0
           ? Array.from(this.environmentParticles.values())

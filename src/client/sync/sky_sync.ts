@@ -2,8 +2,9 @@
 // SKY EFFECTS STATE SYNC MODULE
 // ============================================================================
 
-import type { SkyEffectState, SkyEffectStateUpdate } from '../types/multiplayer';
 import { ThrottledFunction } from '../utils/multiplayer_serialization';
+
+import type { SkyEffectState, SkyEffectStateUpdate } from '../types/multiplayer';
 
 /**
  * Tracks and detects sky effect state changes for synchronization

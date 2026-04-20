@@ -32,7 +32,10 @@ const serviceProxy = Object.fromEntries(
       changeOrigin: true
     }
   ])
-) as Record<string, { target: string; changeOrigin: boolean }>;
+) as Record<
+  string,
+  { target: string; changeOrigin: boolean; timeout?: number; proxyTimeout?: number }
+>;
 
 // Long-lived SSE streams must not inherit http-proxy default timeouts (can drop ~10s in dev).
 const multiplayerPrefix = proxiedServices.find((s) => s.name === 'multiplayer')?.routePrefix;

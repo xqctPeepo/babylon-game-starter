@@ -2,19 +2,15 @@
 // ITEM STATE SYNC MODULE
 // ============================================================================
 
-import type BABYLON from '@babylonjs/core';
+import { deserializeQuaternion, ThrottledFunction } from '../utils/multiplayer_serialization';
+
 import type { ItemInstanceState, ItemStateUpdate, ItemCollectionEvent } from '../types/multiplayer';
-import {
-  serializeVector3,
-  ThrottledFunction,
-  hasSignificantVector3Change
-} from '../utils/multiplayer_serialization';
 
 /**
  * Tracks and detects item state changes for synchronization
  */
 export class ItemSync {
-  private itemStates: Map<string, ItemInstanceState> = new Map();
+  private itemStates = new Map<string, ItemInstanceState>();
   private collectionEvents: ItemCollectionEvent[] = [];
   private throttle: ThrottledFunction;
 
@@ -50,8 +46,7 @@ export class ItemSync {
 
     const update: ItemStateUpdate = {
       updates: Array.from(this.itemStates.values()),
-      collections:
-        this.collectionEvents.length > 0 ? [...this.collectionEvents] : undefined,
+      collections: this.collectionEvents.length > 0 ? [...this.collectionEvents] : undefined,
       timestamp
     };
 
@@ -70,10 +65,10 @@ export class ItemSync {
 
   /**
    * Applies remote item state to mesh
-   * 
+   *
    * Applied properties:
    * - Position
-   * - Rotation (from [x, y, z] Euler angles)
+   * - Rotation (quaternion [x, y, z, w] wire format only)
    * - Velocity (stored for physics, not directly applied)
    * - Collection status
    */
@@ -90,18 +85,11 @@ export class ItemSync {
       console.warn('[ItemSync] Failed to apply position:', e);
     }
 
-    // Apply rotation from Euler angles [x, y, z]
+    // Apply rotation — wire format is quaternion [x, y, z, w] only
     try {
-      if (itemMesh.rotationQuaternion) {
-        const quat = BABYLON.Quaternion.FromEulerAngles(
-          state.rotation[0],
-          state.rotation[1],
-          state.rotation[2]
-        );
-        itemMesh.rotationQuaternion.copyFrom(quat);
-      } else {
-        itemMesh.rotation.set(state.rotation[0], state.rotation[1], state.rotation[2]);
-      }
+      const q = deserializeQuaternion(state.rotation);
+      itemMesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
+      itemMesh.rotationQuaternion.copyFrom(q);
     } catch (e) {
       console.warn('[ItemSync] Failed to apply rotation:', e);
     }
