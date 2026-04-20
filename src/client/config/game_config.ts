@@ -300,5 +300,14 @@ export const CONFIG: GameConfig = {
     Z_INDEX: 1800,
     BUTTON_Z_INDEX: 2000,
     TILES: [] // Tiles will be added dynamically by InventoryManager
+  },
+
+  // Multiplayer Configuration
+  MULTIPLAYER: {
+    ENABLED: true, // Set to false to disable multiplayer entirely
+    PRODUCTION_SERVER: 'bgs-mp.onrender.com', // Production multiplayer server
+    LOCAL_SERVER: 'localhost:5000', // Local development server
+    CONNECTION_TIMEOUT_MS: 15000, // 15 seconds (accounts for Render cold starts)
+    PRODUCTION_FIRST: true // Try production server before falling back to local
   }
 } as const;

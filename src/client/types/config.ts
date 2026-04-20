@@ -63,6 +63,14 @@ export interface PerformanceConfig {
   readonly WEBGPU_WHEN_AVAILABLE: boolean;
 }
 
+export interface MultiplayerConfig {
+  readonly ENABLED: boolean;
+  readonly PRODUCTION_SERVER: string; // e.g., 'bgs-mp.onrender.com'
+  readonly LOCAL_SERVER: string; // e.g., 'localhost:5000'
+  readonly CONNECTION_TIMEOUT_MS: number; // Max time to wait for connection
+  readonly PRODUCTION_FIRST: boolean; // Try production server before local
+}
+
 export interface GameConfig {
   readonly CHARACTER: CharacterConfig;
   readonly CAMERA: CameraConfig;
@@ -74,6 +82,7 @@ export interface GameConfig {
   readonly HUD: HUDConfig;
   readonly SETTINGS: SettingsConfig;
   readonly INVENTORY: InventoryConfig;
+  readonly MULTIPLAYER: MultiplayerConfig;
 }
 
 // Forward declarations for circular dependencies

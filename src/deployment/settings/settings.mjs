@@ -8,6 +8,12 @@ const deploymentSettings = {
       type: 'node',
       routePrefix: '/api',
       localPort: 8787
+    },
+    {
+      name: 'multiplayer',
+      type: 'go',
+      routePrefix: '/api/multiplayer',
+      localPort: 5000
     }
   ],
   static: {
