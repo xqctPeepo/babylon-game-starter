@@ -5,7 +5,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/starfederation/datastar-go/datastar"
 )
 
 // JoinRequest is sent by client when joining multiplayer session
@@ -16,18 +19,10 @@ type JoinRequest struct {
 
 // JoinResponse returns connection details to client
 type JoinResponse struct {
-	ClientID       string `json:"client_id"`
-	IsSynchronizer bool   `json:"is_synchronizer"`
-	ExistingClients int   `json:"existing_clients"`
-	SessionID      string `json:"session_id"`
-}
-
-// ClientStateMessage wraps client state info
-type ClientStateMessage struct {
-	ClientID    string `json:"client_id"`
-	Environment string `json:"environment"`
-	Character   string `json:"character"`
-	Timestamp   int64  `json:"timestamp"`
+	ClientID        string `json:"client_id"`
+	IsSynchronizer  bool   `json:"is_synchronizer"`
+	ExistingClients int    `json:"existing_clients"`
+	SessionID       string `json:"session_id"`
 }
 
 // handleJoin processes client join requests
@@ -66,10 +61,12 @@ func (ms *MultiplayerServer) handleJoin(w http.ResponseWriter, r *http.Request) 
 
 	// Add client to ordered collection
 	client := &ClientConnection{
-		ID:            clientID,
-		IsSynchronizer: false, // Will be set below
-		LastSeen:      time.Now().Unix(),
-		SessionID:     sessionID,
+		ID:              clientID,
+		IsSynchronizer:  false, // Will be set below
+		LastSeen:        time.Now().Unix(),
+		SessionID:       sessionID,
+		EnvironmentName: req.EnvironmentName,
+		CharacterName:   req.CharacterName,
 	}
 
 	ms.clients[clientID] = client
@@ -109,13 +106,8 @@ func (ms *MultiplayerServer) handleJoin(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
 
-	// Broadcast client joined signal to all clients
-	ms.broadcastClientEvent("client_joined", ClientStateMessage{
-		ClientID:    clientID,
-		Environment: req.EnvironmentName,
-		Character:   req.CharacterName,
-		Timestamp:   time.Now().UnixMilli(),
-	})
+	// client-joined is broadcast from handleSSE after the SSE session is registered
+	// so at least one EventSource exists to receive it.
 }
 
 // handleLeave processes client disconnect
@@ -168,15 +160,16 @@ func (ms *MultiplayerServer) handleCharacterStateUpdate(w http.ResponseWriter, r
 		return
 	}
 
-	if !ms.verifySynchronizer(r) {
-		http.Error(w, "Only synchronizer can update state", http.StatusForbidden)
-		return
-	}
-
 	// Parse state update
 	var update map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Each client sends their own pose (not only the synchronizer); X-Client-ID must match every update.clientId.
+	if !ms.verifyCharacterPoseSender(r, update) {
+		http.Error(w, "Invalid character-state sender or payload", http.StatusForbidden)
 		return
 	}
 
@@ -309,55 +302,103 @@ func (ms *MultiplayerServer) verifySynchronizer(r *http.Request) bool {
 	return clientID == ms.synchronizerID && ms.synchronizerID != ""
 }
 
-// broadcastClientEvent broadcasts client connection/disconnection events
-func (ms *MultiplayerServer) broadcastClientEvent(eventType string, msg ClientStateMessage) {
-	ms.broadcastToAll(eventType, msg)
+// verifyCharacterPoseSender ensures X-Client-ID is a known client and each updates[] entry targets only that client.
+func (ms *MultiplayerServer) verifyCharacterPoseSender(r *http.Request, payload map[string]interface{}) bool {
+	sender := strings.TrimSpace(r.Header.Get("X-Client-ID"))
+	if sender == "" {
+		return false
+	}
+
+	ms.mu.RLock()
+	_, known := ms.clients[sender]
+	ms.mu.RUnlock()
+	if !known {
+		return false
+	}
+
+	rawUpdates, ok := payload["updates"].([]interface{})
+	if !ok || len(rawUpdates) == 0 {
+		return false
+	}
+
+	for _, u := range rawUpdates {
+		um, ok := u.(map[string]interface{})
+		if !ok {
+			return false
+		}
+		cid, ok := um["clientId"].(string)
+		if !ok || cid != sender {
+			return false
+		}
+	}
+	return true
 }
 
 // removeClient removes a client from the server
 func (ms *MultiplayerServer) removeClient(clientID string) {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
+	var (
+		wasSynchronizer bool
+		remaining       int
+		newSyncID       string
+		shouldPromote   bool
+	)
 
+	ms.mu.Lock()
 	client, exists := ms.clients[clientID]
 	if !exists {
+		ms.mu.Unlock()
 		return
 	}
 
-	// Remove from clients map
+	wasSynchronizer = client.IsSynchronizer
 	delete(ms.clients, clientID)
-
-	// Remove from order slice
 	for i, id := range ms.clientOrder {
 		if id == clientID {
 			ms.clientOrder = append(ms.clientOrder[:i], ms.clientOrder[i+1:]...)
 			break
 		}
 	}
-
-	// Remove session mapping
 	delete(ms.sessionIDToClientID, client.SessionID)
 
-	log.Printf("[Leave] Client %s disconnected (WasSynchronizer: %v)", clientID, client.IsSynchronizer)
-
-	// If synchronizer disconnected, promote next client
-	if client.IsSynchronizer && len(ms.clientOrder) > 0 {
-		newSyncID := ms.clientOrder[0]
-		ms.clients[newSyncID].IsSynchronizer = true
+	remaining = len(ms.clients)
+	if wasSynchronizer && remaining > 0 {
+		newSyncID = ms.clientOrder[0]
+		if c := ms.clients[newSyncID]; c != nil {
+			c.IsSynchronizer = true
+		}
 		ms.setSynchronizerID(newSyncID)
+		shouldPromote = true
+	} else if wasSynchronizer {
+		ms.setSynchronizerID("")
+	}
+	ms.mu.Unlock()
 
+	log.Printf("[Leave] Client %s disconnected (WasSynchronizer: %v)", clientID, wasSynchronizer)
+
+	if shouldPromote {
 		log.Printf("[Synchronizer] Failover to %s", newSyncID)
-
 		ms.broadcastToAll("synchronizer-changed", map[string]interface{}{
-			"new_synchronizer_id": newSyncID,
-			"reason":              "disconnection",
-			"timestamp":           time.Now().UnixMilli(),
+			"newSynchronizerId": newSyncID,
+			"reason":            "disconnection",
+			"timestamp":         time.Now().UnixMilli(),
 		})
 	}
+
+	ms.broadcastToAll("client-left", map[string]interface{}{
+		"eventType":    "left",
+		"clientId":     clientID,
+		"totalClients": remaining,
+		"timestamp":    time.Now().UnixMilli(),
+	})
 }
 
 // handleSSE manages Datastar SSE connections for real-time signal broadcasting
 func (ms *MultiplayerServer) handleSSE(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	// Get session ID from query or header
 	sessionID := r.URL.Query().Get("sid")
 	if sessionID == "" {
@@ -378,20 +419,44 @@ func (ms *MultiplayerServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reject a second live stream for the same session: overwriting the map would strand
+	// the previous handler's defer (unregister / removeClient) on the wrong generator.
+	ms.sseMu.Lock()
+	if cur := ms.sseSessions[sessionID]; cur != nil && !cur.IsClosed() {
+		ms.sseMu.Unlock()
+		http.Error(w, "Stream already open for this session", http.StatusConflict)
+		return
+	}
+	ms.sseMu.Unlock()
+
 	log.Printf("[SSE] Client %s establishing SSE connection", clientID)
 
-	// Create Datastar broker (SSE endpoint)
-	broker := ms.brokerFactory.NewBroker()
+	sse := datastar.NewSSE(w, r)
+	ms.registerSSESession(sessionID, sse)
 
-	// Register this broker session for broadcasts
-	ms.registerBrokerSession(sessionID, broker)
+	ms.mu.RLock()
+	total := len(ms.clients)
+	var env, char string
+	if c := ms.clients[clientID]; c != nil {
+		env = c.EnvironmentName
+		char = c.CharacterName
+	}
+	ms.mu.RUnlock()
+	ms.broadcastToAll("client-joined", map[string]interface{}{
+		"eventType":    "joined",
+		"clientId":     clientID,
+		"environment":  env,
+		"character":    char,
+		"totalClients": total,
+		"timestamp":    time.Now().UnixMilli(),
+	})
 
-	// Defer cleanup on disconnect
 	defer func() {
-		ms.unregisterBrokerSession(sessionID)
-		log.Printf("[SSE] Client %s disconnected", clientID)
+		ms.unregisterSSESession(sessionID)
+		// Tab close / network drop: remove logical client so role and counts stay correct
+		ms.removeClient(clientID)
+		log.Printf("[SSE] Client %s stream ended", clientID)
 	}()
 
-	// Handle SSE connection (Datastar will handle the response headers)
-	broker.Handle(w, r)
+	<-sse.Context().Done()
 }

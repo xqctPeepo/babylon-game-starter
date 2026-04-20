@@ -16,7 +16,7 @@ This guide walks through the multiplayer architecture implementation for babylon
 - **HTTP Handlers**: Join/leave endpoints, health check
 - **State Update Handlers**: Receive and broadcast state updates
 - **Client Registry**: Ordered map for synchronizer role management
-- **SSE Broker**: Datastar-managed real-time messaging
+- **SSE + patch-signals**: Long-lived `EventSource` stream; server pushes `datastar-patch-signals` events (Datastar Go SDK `MarshalAndPatchSignals`)
 
 ---
 

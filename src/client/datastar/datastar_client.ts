@@ -12,8 +12,8 @@
  * - Automatic reconnection with exponential backoff
  * - Configurable server endpoints (production or local)
  * 
- * The Datastar way: Server pushes state changes via SIGNAL messages;
- * client applies updates declaratively using Server-Sent Events.
+ * The Datastar way: server-sent `datastar-patch-signals` events (JSON from the Go SDK
+ * `MarshalAndPatchSignals` patch-signals wire format). This client uses `EventSource` and dispatches by signal name.
  */
 
 export interface DatastarSignalListener<T = unknown> {
@@ -59,9 +59,25 @@ export class DatastarClient {
   /**
    * Connects to the Datastar server via SSE with timeout
    */
-  public async connect(timeoutMs = 10000): Promise<void> {
+  public async connect(timeoutMs?: number): Promise<void> {
+    const { CONFIG } = await import('../config/game_config');
+    const effectiveMs = timeoutMs ?? CONFIG.MULTIPLAYER.CONNECTION_TIMEOUT_MS;
+
     return new Promise((resolve, reject) => {
       let connectionTimeout: ReturnType<typeof setTimeout> | null = null;
+      let settled = false;
+
+      const finish = (action: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (connectionTimeout) {
+          clearTimeout(connectionTimeout);
+          connectionTimeout = null;
+        }
+        action();
+      };
 
       try {
         // Build SSE URL with session and client ID headers
@@ -72,48 +88,51 @@ export class DatastarClient {
 
         // Create EventSource for SSE connection
         this.eventSource = new EventSource(url.toString());
-        
-        // Set connection timeout
+
+        // Set connection timeout (CONNECTING without onopen — e.g. proxy stalled)
         connectionTimeout = setTimeout(() => {
           if (this.eventSource && this.eventSource.readyState === EventSource.CONNECTING) {
             this.eventSource.close();
-            reject(new Error(`Connection timeout after ${timeoutMs}ms`));
+            finish(() =>
+              reject(new Error(`Connection timeout after ${effectiveMs}ms`))
+            );
           }
-        }, timeoutMs);
+        }, effectiveMs);
 
         this.eventSource.onopen = () => {
-          if (connectionTimeout) {
-            clearTimeout(connectionTimeout);
-          }
-          this.reconnectAttempts = 0;
-          this.reconnectDelayMs = 1000;
-          this.emit('connected');
-          resolve();
+          finish(() => {
+            this.reconnectAttempts = 0;
+            this.reconnectDelayMs = 1000;
+            this.emit('connected');
+            resolve();
+          });
         };
 
-        // Listen for all Datastar signals
+        // Official datastar-go wire format: event type datastar-patch-signals (see EventTypePatchSignals).
+        this.eventSource.addEventListener('datastar-patch-signals', (event: MessageEvent<string>) => {
+          this.handlePatchSignalsEvent(event.data);
+        });
+
+        // Legacy/default SSE messages (optional fallback)
         this.eventSource.addEventListener('message', (event) => {
           this.handleMessage(event.data);
         });
 
         this.eventSource.onerror = () => {
-          if (connectionTimeout) {
-            clearTimeout(connectionTimeout);
+          // While CONNECTING, some browsers fire transient errors; only act on a closed stream.
+          if (this.eventSource?.readyState !== EventSource.CLOSED) {
+            return;
           }
-          if (this.eventSource?.readyState === EventSource.CLOSED) {
-            const error = new Error('SSE connection closed');
-            this.emit('error', error);
-            if (!this.isIntentionallyClosed) {
-              this.attemptReconnect();
-            }
-            reject(error);
+          const error = new Error('SSE connection closed');
+          this.emit('error', error);
+          if (!this.isIntentionallyClosed) {
+            this.attemptReconnect();
           }
+          // Reject is a no-op if onopen already called finish (settled).
+          finish(() => reject(error));
         };
       } catch (error) {
-        if (connectionTimeout) {
-          clearTimeout(connectionTimeout);
-        }
-        reject(error);
+        finish(() => reject(error));
       }
     });
   }
@@ -261,6 +280,41 @@ export class DatastarClient {
     }
   }
 
+  /**
+   * Parses SSE payload from datastar-go PatchSignals / MarshalAndPatchSignals:
+   * one or more lines `signals <json fragment>` (fragments join on newlines to recreate JSON).
+   */
+  private handlePatchSignalsEvent(rawData: string): void {
+    try {
+      const lines = rawData.split('\n');
+      const fragments: string[] = [];
+      for (const line of lines) {
+        const trimmed = line.replace(/\r$/, '');
+        if (trimmed.startsWith('signals ')) {
+          fragments.push(trimmed.slice('signals '.length));
+        }
+      }
+      if (fragments.length === 0) {
+        return;
+      }
+      const merged = fragments.join('\n');
+      const patch = JSON.parse(merged) as { mp?: { name?: string; payload?: unknown } };
+      const name = patch.mp?.name;
+      if (!name) {
+        return;
+      }
+      const listeners = this.signalListeners.get(name);
+      if (listeners) {
+        for (const listener of listeners) {
+          listener(patch.mp!.payload as never);
+        }
+      }
+      this.messageIndex++;
+    } catch (error) {
+      console.warn('Failed to parse datastar-patch-signals message:', error);
+    }
+  }
+
   private emit<K extends keyof DatastarEventMap>(
     event: K,
     data?: DatastarEventMap[K]
@@ -299,10 +353,40 @@ export class DatastarClient {
  */
 let globalDatastarClient: DatastarClient | null = null;
 
+/** Single flight: health probe + chosen stream URL (absolute). */
+let resolvedStreamUrlPromise: Promise<string> | null = null;
+
+function ensureMultiplayerStreamUrlResolved(): Promise<string> {
+  if (!resolvedStreamUrlPromise) {
+    resolvedStreamUrlPromise = determineMultiplayerUrl();
+  }
+  return resolvedStreamUrlPromise;
+}
+
 /**
- * Determines the multiplayer server URL based on configuration
- * Tries production URL first if enabled, falls back to local server
+ * Origin of the Go multiplayer service (`https://host[:port]`), after the same discovery
+ * as the SSE client. Use for `join` / `leave` / `PATCH` when the game SPA is not same-origin
+ * with the API (e.g. fork deploys static site + separate Render service).
  */
+export async function getMultiplayerHttpOrigin(): Promise<string> {
+  const streamUrl = await ensureMultiplayerStreamUrlResolved();
+  return new URL(streamUrl).origin;
+}
+
+function normalizeMultiplayerHostInput(raw: string): string {
+  let s = raw.trim();
+  if (!s) {
+    return '';
+  }
+  if (s.startsWith('https://')) {
+    s = s.slice('https://'.length);
+  } else if (s.startsWith('http://')) {
+    s = s.slice('http://'.length);
+  }
+  s = s.split('/')[0] ?? '';
+  return s.trim();
+}
+
 async function determineMultiplayerUrl(): Promise<string> {
   // Late import to avoid circular dependency issues
   const { CONFIG } = await import('../config/game_config');
@@ -311,28 +395,45 @@ async function determineMultiplayerUrl(): Promise<string> {
     throw new Error('Multiplayer is disabled in configuration');
   }
 
+  const timeoutMs = CONFIG.MULTIPLAYER.CONNECTION_TIMEOUT_MS;
+  const envRaw = import.meta.env.VITE_MULTIPLAYER_HOST;
+  const envHost =
+    typeof envRaw === 'string' && envRaw.trim().length > 0
+      ? normalizeMultiplayerHostInput(envRaw)
+      : '';
+
+  if (envHost) {
+    const only = await attemptServerConnection(envHost, timeoutMs);
+    if (only) {
+      return only;
+    }
+    throw new Error(
+      `VITE_MULTIPLAYER_HOST is set to "${envHost}" but health check failed. Fix the host or unset the variable to use CONFIG.MULTIPLAYER defaults.`
+    );
+  }
+
+  // `npm run dev`: same-origin requests hit the Vite proxy → Go on :5000 (no remote probe, no CORS).
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    return `${window.location.origin}/api/multiplayer/stream`;
+  }
+
   const productionServer = CONFIG.MULTIPLAYER.PRODUCTION_SERVER;
   const localServer = CONFIG.MULTIPLAYER.LOCAL_SERVER;
-  const timeoutMs = CONFIG.MULTIPLAYER.CONNECTION_TIMEOUT_MS;
   const tryProductionFirst = CONFIG.MULTIPLAYER.PRODUCTION_FIRST;
 
-  // Determine which server to try first
   const primaryServer = tryProductionFirst ? productionServer : localServer;
   const fallbackServer = tryProductionFirst ? localServer : productionServer;
 
-  // Try primary server first
   const primaryUrl = await attemptServerConnection(primaryServer, timeoutMs);
   if (primaryUrl) {
     return primaryUrl;
   }
 
-  // Fall back to secondary server
   const fallbackUrl = await attemptServerConnection(fallbackServer, timeoutMs);
   if (fallbackUrl) {
     return fallbackUrl;
   }
 
-  // Both servers failed, throw error
   throw new Error(
     `Failed to connect to multiplayer servers: ${primaryServer} and ${fallbackServer}`
   );
@@ -342,7 +443,6 @@ async function determineMultiplayerUrl(): Promise<string> {
  * Attempts to connect to a server and returns the SSE URL if successful
  */
 async function attemptServerConnection(server: string, timeoutMs: number): Promise<string | null> {
-  const isProduction = server.includes('onrender') || server.includes(':');
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
 
   try {
@@ -360,7 +460,7 @@ async function attemptServerConnection(server: string, timeoutMs: number): Promi
     clearTimeout(timeoutId);
 
     if (response.ok) {
-      const sseUrl = `${protocol}//${server}/api/multiplayer/ws`;
+      const sseUrl = `${protocol}//${server}/api/multiplayer/stream`;
       console.log(`[Datastar] ✓ Server available at ${server}`);
       return sseUrl;
     }
@@ -378,12 +478,13 @@ async function attemptServerConnection(server: string, timeoutMs: number): Promi
  */
 export function getDatastarClient(): DatastarClient {
   if (!globalDatastarClient) {
-    // Create a placeholder; will set URL once determined
-    // Use localhost as temporary placeholder
-    globalDatastarClient = new DatastarClient('http://localhost:5000/api/multiplayer/ws');
+    const initialStream =
+      import.meta.env.DEV && typeof window !== 'undefined'
+        ? `${window.location.origin}/api/multiplayer/stream`
+        : 'http://127.0.0.1:5000/api/multiplayer/stream';
+    globalDatastarClient = new DatastarClient(initialStream);
 
-    // Determine the actual URL asynchronously
-    determineMultiplayerUrl()
+    ensureMultiplayerStreamUrlResolved()
       .then((url) => {
         if (globalDatastarClient) {
           globalDatastarClient.setUrl(url);
@@ -403,4 +504,7 @@ export function getDatastarClient(): DatastarClient {
  */
 export function setDatastarClient(client: DatastarClient | null): void {
   globalDatastarClient = client;
+  if (client === null) {
+    resolvedStreamUrlPromise = null;
+  }
 }

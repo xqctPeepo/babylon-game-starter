@@ -198,6 +198,10 @@ export class SceneManager {
     return this.scene;
   }
 
+  public getCharacterController(): CharacterController | null {
+    return this.characterController;
+  }
+
   private discardEnvironmentHiddenTracking(): void {
     this.environmentHiddenUntilCharacterReady.length = 0;
   }

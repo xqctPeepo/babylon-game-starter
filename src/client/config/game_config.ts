@@ -302,12 +302,13 @@ export const CONFIG: GameConfig = {
     TILES: [] // Tiles will be added dynamically by InventoryManager
   },
 
-  // Multiplayer Configuration
+  // Multiplayer: forks can point the client at their own Go server without editing this block
+  // by setting VITE_MULTIPLAYER_HOST in .env / .env.local (see repo .env.example).
   MULTIPLAYER: {
-    ENABLED: true, // Set to false to disable multiplayer entirely
-    PRODUCTION_SERVER: 'bgs-mp.onrender.com', // Production multiplayer server
-    LOCAL_SERVER: 'localhost:5000', // Local development server
-    CONNECTION_TIMEOUT_MS: 15000, // 15 seconds (accounts for Render cold starts)
-    PRODUCTION_FIRST: true // Try production server before falling back to local
+    ENABLED: true,
+    PRODUCTION_SERVER: 'bgs-mp.onrender.com',
+    LOCAL_SERVER: 'localhost:5000',
+    CONNECTION_TIMEOUT_MS: 15000,
+    PRODUCTION_FIRST: true
   }
 } as const;

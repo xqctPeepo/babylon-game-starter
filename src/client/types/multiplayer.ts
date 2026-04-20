@@ -2,8 +2,6 @@
 // MULTIPLAYER SYNCHRONIZED STATE TYPES
 // ============================================================================
 
-import type BABYLON from '@babylonjs/core';
-
 /**
  * Serializable Vector3 as [x, y, z]
  */
@@ -19,20 +17,22 @@ export type ColorSerializable = [number, number, number] | [number, number, numb
  */
 export interface MultiplayerClientState {
   readonly clientId: string;
-  readonly isSynchronizer: boolean;
+  /** Updated in place when `synchronizer-changed` patch-signals arrive. */
+  isSynchronizer: boolean;
   readonly sessionStarted: string; // ISO timestamp
   readonly environment: string; // Current environment name
   readonly character: string; // Current character name
 }
 
 /**
- * Join response from server
+ * Join response from server (JSON matches Go `JoinResponse` snake_case tags).
  */
 export interface JoinResponse {
-  readonly clientId: string;
-  readonly isSynchronizer: boolean;
-  readonly existingClients: number;
-  readonly sessionId: string; // Session token for SSE auth
+  readonly client_id: string;
+  readonly is_synchronizer: boolean;
+  readonly existing_clients: number;
+  /** Session token for SSE auth (`GET /api/multiplayer/stream?sid=…`). */
+  readonly session_id: string;
 }
 
 // ============================================================================

@@ -1,9 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/starfederation/datastar-go/datastar"
@@ -11,20 +12,22 @@ import (
 
 // ClientConnection represents a connected multiplayer client
 type ClientConnection struct {
-	ID            string
-	IsSynchronizer bool
-	LastSeen      int64
-	SessionID     string
+	ID              string
+	IsSynchronizer  bool
+	LastSeen        int64
+	SessionID       string
+	EnvironmentName string
+	CharacterName   string
 }
 
 // MultiplayerServer manages all connected clients and state synchronization
 type MultiplayerServer struct {
 	mu                  sync.RWMutex
 	clients             map[string]*ClientConnection // Map of clientID -> connection
-	clientOrder         []string                       // Maintains connection order for synchronizer role
+	clientOrder         []string                     // Maintains connection order for synchronizer role
 	synchronizerID      string
 	maxClients          int
-	sessionIDToClientID map[string]string // For SSE auth
+	sessionIDToClientID map[string]string                             // For SSE auth
 	sseSessions         map[string]*datastar.ServerSentEventGenerator // Track active SSE sessions
 	sseMu               sync.RWMutex
 }
@@ -56,7 +59,7 @@ func (ms *MultiplayerServer) setSynchronizerID(id string) {
 func (ms *MultiplayerServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/multiplayer/join", ms.handleJoin)
 	mux.HandleFunc("/api/multiplayer/leave", ms.handleLeave)
-	mux.HandleFunc("/api/multiplayer/ws", ms.handleSSE)
+	mux.HandleFunc("/api/multiplayer/stream", ms.handleSSE)
 	mux.HandleFunc("/api/multiplayer/health", ms.handleHealth)
 	mux.HandleFunc("/api/multiplayer/character-state", ms.handleCharacterStateUpdate)
 	mux.HandleFunc("/api/multiplayer/item-state", ms.handleItemStateUpdate)
@@ -65,16 +68,10 @@ func (ms *MultiplayerServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/multiplayer/sky-effects-state", ms.handleSkyEffectsStateUpdate)
 }
 
-// broadcastToAll sends a signal to all connected clients via SSE
+// broadcastToAll sends a signal to all connected clients via Datastar patch-signals SSE.
 func (ms *MultiplayerServer) broadcastToAll(signalName string, payload interface{}) error {
 	if payload == nil {
 		return nil
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("[Broadcast] Failed to marshal payload: %v", err)
-		return err
 	}
 
 	ms.sseMu.RLock()
@@ -96,7 +93,7 @@ func (ms *MultiplayerServer) broadcastToAll(signalName string, payload interface
 			continue
 		}
 		go func(stream *datastar.ServerSentEventGenerator) {
-			if err := stream.PatchSignals(payloadJSON); err != nil {
+			if err := stream.MarshalAndPatchSignals(multiplayerSignalPatch(signalName, payload)); err != nil {
 				log.Printf("[Broadcast] Failed to patch signals for %s: %v", signalName, err)
 			}
 		}(sse)
@@ -112,19 +109,13 @@ func (ms *MultiplayerServer) broadcastExcept(excludedSessionID string, signalNam
 		return nil
 	}
 
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("[Broadcast] Failed to marshal payload: %v", err)
-		return err
-	}
-
 	ms.sseMu.RLock()
 	for sessionID, sse := range ms.sseSessions {
 		if sessionID == excludedSessionID || sse == nil || sse.IsClosed() {
 			continue
 		}
 		go func(stream *datastar.ServerSentEventGenerator) {
-			if err := stream.PatchSignals(payloadJSON); err != nil {
+			if err := stream.MarshalAndPatchSignals(multiplayerSignalPatch(signalName, payload)); err != nil {
 				log.Printf("[Broadcast] Failed to patch signals for %s: %v", signalName, err)
 			}
 		}(sse)
@@ -132,6 +123,17 @@ func (ms *MultiplayerServer) broadcastExcept(excludedSessionID string, signalNam
 	ms.sseMu.RUnlock()
 
 	return nil
+}
+
+// multiplayerSignalPatch builds the JSON object merged into the client signal root.
+// The browser client listens for datastar-patch-signals and dispatches on mp.name / mp.payload.
+func multiplayerSignalPatch(signalName string, payload interface{}) map[string]any {
+	return map[string]any{
+		"mp": map[string]any{
+			"name":    signalName,
+			"payload": payload,
+		},
+	}
 }
 
 // registerSSESession tracks a new SSE session
@@ -168,10 +170,17 @@ func main() {
 		w.Write([]byte(`{"ok":true,"service":"multiplayer"}`))
 	})
 
-	// Start HTTP server on port 5000
-	port := ":5000"
-	log.Printf("[Multiplayer Server] Listening on %s", port)
-	if err := http.ListenAndServe(port, mux); err != nil {
+	port := strings.TrimSpace(os.Getenv("PORT"))
+	if port == "" {
+		port = "5000"
+	}
+	if !strings.HasPrefix(port, ":") {
+		port = ":" + port
+	}
+
+	handler := withCORS(mux)
+	log.Printf("[Multiplayer Server] Listening on %s (set PORT to override; CORS via MULTIPLAYER_CORS_ALLOW_ORIGIN)", port)
+	if err := http.ListenAndServe(port, handler); err != nil {
 		log.Fatalf("[Multiplayer Server] Failed to start: %v", err)
 	}
 }

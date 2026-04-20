@@ -7,6 +7,8 @@
 import { ASSETS } from './config/assets';
 import { CharacterLoader } from './managers/character_loader';
 import { HUDManager } from './managers/hud_manager';
+import { initMultiplayerAfterCharacterReady } from './managers/multiplayer_bootstrap';
+import { getMultiplayerManager } from './managers/multiplayer_manager';
 import { SceneManager } from './managers/scene_manager';
 import { InventoryUI } from './ui/inventory_ui';
 import { SettingsUI } from './ui/settings_ui';
@@ -27,6 +29,7 @@ class Playground {
   public static CreateScene(engine: BABYLON.Engine, canvas: HTMLCanvasElement): BABYLON.Scene {
     // Clean up any existing UI elements before creating new ones
     cleanupUI();
+    void getMultiplayerManager().leave().catch(() => {});
 
     const sceneManager = new SceneManager(engine, canvas);
 
@@ -68,6 +71,7 @@ class Playground {
       // Load character model after environment is loaded
       const spawnPoint = defaultEnv.spawnPoint ?? new BABYLON.Vector3(0, 1, 0);
       CharacterLoader.loadCharacterModel(undefined, undefined, spawnPoint);
+      void initMultiplayerAfterCharacterReady(sceneManager, defaultEnvironment);
     });
 
     return sceneManager.getScene();

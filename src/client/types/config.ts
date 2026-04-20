@@ -65,10 +65,13 @@ export interface PerformanceConfig {
 
 export interface MultiplayerConfig {
   readonly ENABLED: boolean;
-  readonly PRODUCTION_SERVER: string; // e.g., 'bgs-mp.onrender.com'
-  readonly LOCAL_SERVER: string; // e.g., 'localhost:5000'
-  readonly CONNECTION_TIMEOUT_MS: number; // Max time to wait for connection
-  readonly PRODUCTION_FIRST: boolean; // Try production server before local
+  /** Default public host when not using `VITE_MULTIPLAYER_HOST` (host[:port], no scheme). */
+  readonly PRODUCTION_SERVER: string;
+  /** Default dev host when not using `VITE_MULTIPLAYER_HOST` (host[:port], no scheme). */
+  readonly LOCAL_SERVER: string;
+  readonly CONNECTION_TIMEOUT_MS: number;
+  /** When no `VITE_MULTIPLAYER_HOST`: try `PRODUCTION_SERVER` before `LOCAL_SERVER`. */
+  readonly PRODUCTION_FIRST: boolean;
 }
 
 export interface GameConfig {

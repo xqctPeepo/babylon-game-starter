@@ -2,12 +2,15 @@
 // MULTIPLAYER MANAGER - Client-side orchestration
 // ============================================================================
 
-import { getDatastarClient, type DatastarClient } from '../datastar/datastar_client';
+import {
+  getDatastarClient,
+  getMultiplayerHttpOrigin,
+  type DatastarClient
+} from '../datastar/datastar_client';
 import { CONFIG } from '../config/game_config';
 import type {
   MultiplayerClientState,
   JoinResponse,
-  CharacterState,
   ItemStateUpdate,
   EffectStateUpdate,
   LightStateUpdate,
@@ -35,6 +38,8 @@ export class MultiplayerManager {
   private static instance: MultiplayerManager | null = null;
   
   private clientState: MultiplayerClientState | null = null;
+  /** Base `https://host:port` for REST calls (may differ from page origin when using VITE_MULTIPLAYER_HOST). */
+  private mpHttpOrigin: string | null = null;
   private datastarClient: DatastarClient;
   private isConnected = false;
   private listeners: Map<string, Set<Function>> = new Map();
@@ -42,7 +47,7 @@ export class MultiplayerManager {
   // Signal unsubscribers
   private unsubscribers: Array<() => void> = [];
 
-  constructor(config?: MultiplayerManagerConfig) {
+  constructor(_config?: MultiplayerManagerConfig) {
     this.datastarClient = getDatastarClient();
     this.setupEventListeners();
   }
@@ -68,8 +73,12 @@ export class MultiplayerManager {
     try {
       console.log('[MultiplayerManager] Joining multiplayer session...');
 
+      this.mpHttpOrigin = await getMultiplayerHttpOrigin();
+      // Ensure EventSource URL is set before connect (same promise as getDatastarClient, but avoid a race with its .then microtask).
+      this.datastarClient.setUrl(`${this.mpHttpOrigin}/api/multiplayer/stream`);
+
       // Call join endpoint
-      const response = await fetch('/api/multiplayer/join', {
+      const response = await fetch(`${this.mpHttpOrigin}/api/multiplayer/join`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -108,6 +117,7 @@ export class MultiplayerManager {
       this.isConnected = true;
       this.emit('connected', this.clientState);
     } catch (error) {
+      this.mpHttpOrigin = null;
       console.error('[MultiplayerManager] Join failed:', error);
       this.emit('error', error);
       throw error;
@@ -132,7 +142,8 @@ export class MultiplayerManager {
       this.unsubscribers = [];
 
       // Call leave endpoint
-      await fetch('/api/multiplayer/leave', {
+      const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
+      await fetch(`${origin}/api/multiplayer/leave`, {
         method: 'POST',
         headers: {
           'X-Client-ID': this.clientState.clientId
@@ -144,6 +155,7 @@ export class MultiplayerManager {
 
       this.isConnected = false;
       this.clientState = null;
+      this.mpHttpOrigin = null;
       this.emit('disconnected');
     } catch (error) {
       console.error('[MultiplayerManager] Leave failed:', error);
@@ -186,19 +198,23 @@ export class MultiplayerManager {
   }
 
   /**
-   * Sends character state update (synchronizer only)
+   * Sends this client's character pose. Every connected client may send their own avatar;
+   * the server rejects updates whose `clientId` does not match `X-Client-ID`.
+   * (World/item/effects sync remains synchronizer-only — see other update* methods.)
    */
   public async updateCharacterState(update: CharacterStateUpdate): Promise<void> {
-    if (!this.isSynchronizer()) {
-      console.warn('[MultiplayerManager] Only synchronizer can update character state');
+    const st = this.clientState;
+    if (!st) {
       return;
     }
 
+    const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
     try {
-      await this.datastarClient.patch('/api/multiplayer/character-state', {
-        updates: update.updates,
-        timestamp: update.timestamp
-      });
+      await this.datastarClient.patch(
+        `${origin}/api/multiplayer/character-state`,
+        { updates: update.updates, timestamp: update.timestamp },
+        { headers: { 'X-Client-ID': st.clientId } }
+      );
     } catch (error) {
       console.error('[MultiplayerManager] Failed to update character state:', error);
     }
@@ -213,12 +229,22 @@ export class MultiplayerManager {
       return;
     }
 
+    const st = this.clientState;
+    if (!st) {
+      return;
+    }
+
+    const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
     try {
-      await this.datastarClient.patch('/api/multiplayer/item-state', {
-        updates: update.updates,
-        collections: update.collections,
-        timestamp: update.timestamp
-      });
+      await this.datastarClient.patch(
+        `${origin}/api/multiplayer/item-state`,
+        {
+          updates: update.updates,
+          collections: update.collections,
+          timestamp: update.timestamp
+        },
+        { headers: { 'X-Client-ID': st.clientId } }
+      );
     } catch (error) {
       console.error('[MultiplayerManager] Failed to update item state:', error);
     }
@@ -233,12 +259,22 @@ export class MultiplayerManager {
       return;
     }
 
+    const st = this.clientState;
+    if (!st) {
+      return;
+    }
+
+    const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
     try {
-      await this.datastarClient.patch('/api/multiplayer/effects-state', {
-        particle_effects: update.particleEffects,
-        environment_particles: update.environmentParticles,
-        timestamp: update.timestamp
-      });
+      await this.datastarClient.patch(
+        `${origin}/api/multiplayer/effects-state`,
+        {
+          particle_effects: update.particleEffects,
+          environment_particles: update.environmentParticles,
+          timestamp: update.timestamp
+        },
+        { headers: { 'X-Client-ID': st.clientId } }
+      );
     } catch (error) {
       console.error('[MultiplayerManager] Failed to update effects state:', error);
     }
@@ -253,11 +289,18 @@ export class MultiplayerManager {
       return;
     }
 
+    const st = this.clientState;
+    if (!st) {
+      return;
+    }
+
+    const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
     try {
-      await this.datastarClient.patch('/api/multiplayer/lights-state', {
-        updates: update.updates,
-        timestamp: update.timestamp
-      });
+      await this.datastarClient.patch(
+        `${origin}/api/multiplayer/lights-state`,
+        { updates: update.updates, timestamp: update.timestamp },
+        { headers: { 'X-Client-ID': st.clientId } }
+      );
     } catch (error) {
       console.error('[MultiplayerManager] Failed to update lights state:', error);
     }
@@ -272,11 +315,18 @@ export class MultiplayerManager {
       return;
     }
 
+    const st = this.clientState;
+    if (!st) {
+      return;
+    }
+
+    const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
     try {
-      await this.datastarClient.patch('/api/multiplayer/sky-effects-state', {
-        updates: update.updates,
-        timestamp: update.timestamp
-      });
+      await this.datastarClient.patch(
+        `${origin}/api/multiplayer/sky-effects-state`,
+        { updates: update.updates, timestamp: update.timestamp },
+        { headers: { 'X-Client-ID': st.clientId } }
+      );
     } catch (error) {
       console.error('[MultiplayerManager] Failed to update sky effects:', error);
     }

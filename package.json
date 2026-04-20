@@ -4,6 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:multiplayer": "nodemon -q --config nodemon.multiplayer.json",
+    "dev:multiplayer:once": "go run -C src/server/multiplayer .",
+    "dev:fullstack": "concurrently -k -n mp,web -c cyan,green \"npm run dev:multiplayer\" \"npm run dev\"",
     "build": "vite build",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -28,6 +31,8 @@
     "babylonjs": "^9.1.0",
     "babylonjs-loaders": "^9.1.0",
     "babylonjs-materials": "^9.1.0",
+    "concurrently": "^9.1.2",
+    "nodemon": "^3.1.9",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.32.0",

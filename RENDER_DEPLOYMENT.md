@@ -201,7 +201,7 @@ Tries: https://bgs-mp.onrender.com/api/multiplayer/health
          ↓
 Health check succeeds
          ↓
-SSE: https://bgs-mp.onrender.com/api/multiplayer/ws
+SSE: `https://bgs-mp.onrender.com/api/multiplayer/stream`
          ↓
 ✅ Connected to multiplayer server
 ```

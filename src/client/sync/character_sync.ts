@@ -47,7 +47,7 @@ export class CharacterSync {
       return null;
     }
 
-    const mesh = this.characterController.getCharacterMesh();
+    const mesh = this.characterController.getPlayerMesh();
     if (!mesh) {
       return null;
     }

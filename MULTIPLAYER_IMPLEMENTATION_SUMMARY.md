@@ -89,7 +89,7 @@ Each sync module provides:
   - `PATCH /api/multiplayer/lights-state` - Lights updates
   - `PATCH /api/multiplayer/sky-effects-state` - Sky effects updates
   - `GET /api/multiplayer/health` - Server health check
-  - `GET /api/multiplayer/ws` - SSE stream (Datastar)
+  - `GET /api/multiplayer/stream` - SSE stream (Datastar)
 
 **Utilities**
 - `src/server/multiplayer/utils.go` - Helper functions
@@ -248,7 +248,7 @@ cd src/server/multiplayer && go run *.go
 # - PATCH /api/multiplayer/effects-state
 # - PATCH /api/multiplayer/lights-state
 # - PATCH /api/multiplayer/sky-effects-state
-# - GET /api/multiplayer/ws (SSE)
+# - GET /api/multiplayer/stream (SSE)
 ```
 
 ### Phase 2: SceneManager Integration
@@ -434,7 +434,7 @@ With 4 players, each moving:
 ### Server-Side
 - `POST /api/multiplayer/join` - Join session
 - `PATCH /api/multiplayer/*-state` - Send updates
-- `GET /api/multiplayer/ws` - SSE connection
+- `GET /api/multiplayer/stream` - SSE connection
 
 ### Sync Modules
 - `CharacterSync.sampleState()` - Detect changes

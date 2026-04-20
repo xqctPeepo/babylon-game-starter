@@ -82,11 +82,11 @@ func validateColor(components []float64) bool {
 // validateAnimationState checks if animation state is valid
 func validateAnimationState(state string) bool {
 	validStates := map[string]bool{
-		"idle":  true,
-		"walk":  true,
-		"run":   true,
-		"jump":  true,
-		"fall":  true,
+		"idle": true,
+		"walk": true,
+		"run":  true,
+		"jump": true,
+		"fall": true,
 	}
 	return validStates[state]
 }
@@ -101,8 +101,8 @@ func validateTimestamp(timestamp int64) bool {
 // validateBoostType checks if boost type is valid
 func validateBoostType(boostType string) bool {
 	validBoosts := map[string]bool{
-		"superJump":     true,
-		"invisibility":  true,
+		"superJump":    true,
+		"invisibility": true,
 	}
 	return boostType == "" || validBoosts[boostType] // Empty string means no boost
 }

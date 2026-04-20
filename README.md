@@ -44,6 +44,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
+**Multiplayer (local):** run `npm run dev:fullstack` to start Vite and the Go API together (Go restarts automatically when you save `src/server/multiplayer/**` — see `nodemon.multiplayer.json`). Or use two terminals: `npm run dev:multiplayer` then `npm run dev`. With `VITE_MULTIPLAYER_HOST` unset, the client uses same-origin `/api/multiplayer/*`, proxied to Go (see `vite.config.ts`). Override the backend with `.env.local` — see `.env.example`.
+
 ---
 
 ## Scripts
@@ -51,6 +53,9 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 | Command                     | Description                                                                 |
 | --------------------------- | ----------------------------------------------------------------------------- |
 | `npm run dev`               | Vite dev server (client root `src/client/`)                                 |
+| `npm run dev:multiplayer`   | Go multiplayer on `:5000`, **restarts on `.go` / `go.mod` / `go.sum` changes** (nodemon) |
+| `npm run dev:multiplayer:once` | One-shot `go run` (no file watcher)                                    |
+| `npm run dev:fullstack`     | Watched Go API + Vite (`-k` stops both if one exits)                         |
 | `npm run build`             | Production build to `dist/`                                                 |
 | `npm run preview`           | Preview the production build                                                  |
 | `npm run format`            | Prettier write on `src/**/*.ts`, `eslint.config.js`, `vite.config.ts`         |

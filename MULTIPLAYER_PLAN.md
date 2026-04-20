@@ -160,7 +160,7 @@ interface MultiplayerClientState {
    - POST `/api/multiplayer/leave` (on disconnect)
 
 ### Go Backend (Datastar)
-1. **SSE Endpoint**: `/api/multiplayer/ws`
+1. **SSE endpoint**: `GET /api/multiplayer/stream` (Server-Sent Events via Datastar)
 2. **Client Registry**: Ordered map of connected clients
 3. **Broadcast Flow**:
    - Receive state update from synchronizer
