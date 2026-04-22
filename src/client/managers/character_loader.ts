@@ -96,8 +96,8 @@ export class CharacterLoader {
       return;
     }
 
-    // Check if character is already cached
-    if (this.currentCharacterName === character.name && this.characterCache.has(character.name)) {
+    // Check if character is already cached (including previously-active characters)
+    if (this.characterCache.has(character.name)) {
       this.activateCachedCharacter(character, preservedPosition);
       return;
     }

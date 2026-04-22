@@ -294,34 +294,7 @@ export class AnimationController {
   private switchAnimationDirectly(targetAnimation: string): void {
     if (this.currentAnimation == null) return;
     const currentAnim = this.scene.getAnimationGroupByName(this.currentAnimation);
-    let targetAnim = this.scene.getAnimationGroupByName(targetAnimation);
-
-    // If target animation not found, try partial match
-    targetAnim ??=
-      this.scene.animationGroups.find(
-        (anim: BABYLON.AnimationGroup) =>
-          anim.name.toLowerCase().includes(targetAnimation.toLowerCase()) ||
-          targetAnimation.toLowerCase().includes(anim.name.toLowerCase())
-      ) ?? null;
-
-    // If still not found, try common fallbacks
-    if (!targetAnim) {
-      if (targetAnimation.toLowerCase().includes('idle')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('idle') || anim.name.toLowerCase().includes('stand')
-          ) ?? null;
-      } else if (targetAnimation.toLowerCase().includes('walk')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('walk') ||
-              anim.name.toLowerCase().includes('run') ||
-              anim.name.toLowerCase().includes('move')
-          ) ?? null;
-      }
-    }
+    const targetAnim = this.findAnimationGroup(targetAnimation);
 
     if (!currentAnim || !targetAnim) {
       return;
@@ -344,42 +317,7 @@ export class AnimationController {
   private startWeightedBlend(targetAnimation: string): void {
     if (this.currentAnimation == null) return;
     const currentAnim = this.scene.getAnimationGroupByName(this.currentAnimation);
-    let targetAnim = this.scene.getAnimationGroupByName(targetAnimation);
-
-    // If target animation not found, try partial match
-    targetAnim ??=
-      this.scene.animationGroups.find(
-        (anim: BABYLON.AnimationGroup) =>
-          anim.name.toLowerCase().includes(targetAnimation.toLowerCase()) ||
-          targetAnimation.toLowerCase().includes(anim.name.toLowerCase())
-      ) ?? null;
-
-    // If still not found, try common fallbacks
-    if (!targetAnim) {
-      if (targetAnimation.toLowerCase().includes('idle')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('idle') || anim.name.toLowerCase().includes('stand')
-          ) ?? null;
-      } else if (targetAnimation.toLowerCase().includes('walk')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('walk') ||
-              anim.name.toLowerCase().includes('run') ||
-              anim.name.toLowerCase().includes('move')
-          ) ?? null;
-      } else if (targetAnimation.toLowerCase().includes('jump')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('jump') ||
-              anim.name.toLowerCase().includes('leap') ||
-              anim.name.toLowerCase().includes('hop')
-          ) ?? null;
-      }
-    }
+    const targetAnim = this.findAnimationGroup(targetAnimation);
 
     if (!currentAnim || !targetAnim) {
       return;
