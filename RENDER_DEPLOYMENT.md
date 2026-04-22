@@ -143,30 +143,12 @@ fi
 # Step 3: Build client
 npm run build  # TypeScript + Babylon.js → /dist
 
-# Step 4: Go multiplayer service auto-built
-# Files: src/server/multiplayer/*.go
-# Binary: Built into container at build time
+# Step 4: (Production) Go binary is built in a separate `golang:1.24-alpine` stage; see Dockerfile.
 ```
 
-### Runtime Stage (Nginx SPA Server)
+### Runtime (nginx + Go in one container)
 
-```dockerfile
-FROM nginx:alpine
-
-# Copy built client assets
-COPY --from=builder /app/dist /usr/share/nginx/html
-
-# Copy nginx config (with API proxying)
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-# Render free tier default port
-ENV PORT=10000
-EXPOSE 10000
-
-CMD ["nginx", "-g", "daemon off;"]
-```
-
-**Note:** Go service should be daemonized/backgrounded by the container orchestration or a process manager. Currently, this setup assumes Nginx proxies to pre-started Go processes. If not handled, you may need a process manager like `supervisord`.
+The production `Dockerfile` copies a static **`multiplayer-server`** binary into the nginx image and starts it with **`docker-entrypoint.sh`**: Go listens on **`:5000`** (nginx `proxy_pass`), nginx listens on **10000**. Render sets `PORT=10000`; the entrypoint runs Go with **`PORT=5000`** so it does not inherit the nginx port.
 
 ---
 
@@ -279,14 +261,19 @@ curl http://localhost:10000/api/multiplayer/health
 - [ ] **Client loads**: Open in browser, check console for errors
 - [ ] **Multiplayer connects**: Client should connect to production server
 
+### Peer visibility (same environment)
+
+Remote avatars are shown only when each client’s **`environmentName`** (from `ASSETS.ENVIRONMENTS[].name`) matches the peer’s reported environment. If two players pick different maps (e.g. Mansion vs Level Test), they will not see each other even though join/SSE succeed—this is intentional routing, not a broken deploy.
+
 ---
 
 ## File Structure
 
 ```
 babylon-game-starter/
-├── Dockerfile                          # ✅ Builds Go + client
-├── nginx.conf                          # ✅ Proxies to port 5000
+├── Dockerfile                          # ✅ Client build + Go binary + nginx runtime
+├── docker-entrypoint.sh               # ✅ Starts Go :5000 + nginx :10000
+├── nginx.conf                          # ✅ Proxies /api/multiplayer to port 5000
 ├── render.yaml                         # Render config
 ├── vite.config.ts                      # Dev server proxy setup
 ├── src/
