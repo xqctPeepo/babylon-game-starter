@@ -39,7 +39,11 @@ export function coerceTriplet(raw: unknown): [number, number, number] | null {
   return coerceWorldVector3(raw);
 }
 
-/** Wire rotation: unit quaternion [x, y, z, w] only. */
+/**
+ * Wire rotation for **character sync only**: unit quaternion [x, y, z, w].
+ * Item rotation is not a separate field on the wire — items carry a single 4x4 world
+ * matrix (Invariant M in [MULTIPLAYER_SYNCH.md §5.2](../../../MULTIPLAYER_SYNCH.md#52-item-state)).
+ */
 export function coerceQuaternion(raw: unknown): QuaternionSerializable | null {
   if (!Array.isArray(raw) || raw.length !== 4) {
     return null;
@@ -54,6 +58,27 @@ export function coerceQuaternion(raw: unknown): QuaternionSerializable | null {
   return normalizeQuaternion([x, y, z, w]);
 }
 
+/**
+ * Coerce the item-wire `matrix` field per Invariant M. Requires an array of length exactly 16
+ * with finite, per-component-clampable entries. Returns the clamped array on success, `null`
+ * on any failure (length mismatch, non-finite component). Callers MUST drop rows that return
+ * `null`.
+ */
+export function coerceMatrix16(raw: unknown): readonly number[] | null {
+  if (!Array.isArray(raw) || raw.length !== 16) {
+    return null;
+  }
+  const out = new Array<number>(16);
+  for (let i = 0; i < 16; i++) {
+    const v = Number(raw[i]);
+    if (!Number.isFinite(v)) {
+      return null;
+    }
+    out[i] = clampCoordComponent(v);
+  }
+  return out;
+}
+
 export function coerceItemInstanceState(raw: unknown): ItemInstanceState | null {
   if (raw === null || typeof raw !== 'object') {
     return null;
@@ -65,30 +90,37 @@ export function coerceItemInstanceState(raw: unknown): ItemInstanceState | null 
     return null;
   }
 
-  const position = coerceWorldVector3(o.position);
-  const rotation = coerceQuaternion(o.rotation);
-  const velocity = coerceWorldVector3(o.velocity);
-  if (!position || !rotation || !velocity) {
+  const isCollected = Boolean(o.isCollected);
+  const matrix = coerceMatrix16(o.matrix);
+  // Invariant M: a live (non-collected) row MUST carry a valid 16-float matrix.
+  // Collection-only rows (isCollected=true) are tolerated without a matrix because
+  // the receiver hides the mesh and the transform is irrelevant.
+  if (!matrix && !isCollected) {
     return null;
   }
 
   const tsNum = Number(o.timestamp);
   const timestamp = Number.isFinite(tsNum) ? tsNum : Date.now();
 
-  const isCollected = Boolean(o.isCollected);
   let collectedBy: string | undefined;
   if (typeof o.collectedByClientId === 'string' && o.collectedByClientId.trim() !== '') {
     collectedBy = o.collectedByClientId.trim();
   }
 
+  let ownerClientId: string | null | undefined;
+  if (typeof o.ownerClientId === 'string' && o.ownerClientId.trim() !== '') {
+    ownerClientId = o.ownerClientId.trim();
+  } else if (o.ownerClientId === null) {
+    ownerClientId = null;
+  }
+
   return {
     instanceId,
     itemName,
-    position,
-    rotation,
-    velocity,
+    matrix: matrix ?? [],
     isCollected,
     collectedByClientId: collectedBy,
+    ownerClientId,
     timestamp
   };
 }

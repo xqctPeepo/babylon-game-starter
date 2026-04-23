@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -216,6 +217,48 @@ func (ms *MultiplayerServer) handleCharacterStateUpdate(w http.ResponseWriter, r
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
+// Invariants M (matrix-only wire) and E (no Euler anywhere on item paths) —
+// see MULTIPLAYER_SYNCH.md §5.2. Every `ItemInstanceState` row carries exactly one
+// transform field, `matrix`, a JSON array of length 16 (row-major 4x4 world matrix).
+// Legacy per-component fields (`position`, `rotation`, `velocity`) are rejected/stripped.
+const itemMatrixLen = 16
+
+// matrixDirty is the element-wise epsilon comparator for the 16-float item matrix
+// field. Populated here so the typed dirty-filter cache — when it is added — can
+// use the same single-tolerance rule described in MULTIPLAYER_INTEGRATION.md.
+const itemMatrixEpsilon = 1e-4
+
+// coerceItemMatrix validates a row's `matrix` field. On success it returns the
+// canonical slice (length 16, all finite). On failure it returns nil; callers MUST
+// drop the row.
+func coerceItemMatrix(row map[string]interface{}) []float64 {
+	raw, ok := row["matrix"].([]interface{})
+	if !ok || len(raw) != itemMatrixLen {
+		return nil
+	}
+	out := make([]float64, itemMatrixLen)
+	for i, v := range raw {
+		f, ok := v.(float64)
+		if !ok {
+			return nil
+		}
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil
+		}
+		out[i] = f
+	}
+	return out
+}
+
+// stripLegacyItemTransformFields removes any per-component transform keys that
+// may arrive from legacy clients (Invariants M and E). The server refuses to
+// propagate them even if present in the incoming row.
+func stripLegacyItemTransformFields(row map[string]interface{}) {
+	delete(row, "position")
+	delete(row, "rotation")
+	delete(row, "velocity")
+}
+
 // handleItemStateUpdate processes item state updates under the hybrid authority model
 // (MULTIPLAYER_SYNCH.md §5.2 / §7.5). Rows are filtered per-instance against the server's
 // itemOwners map:
@@ -226,6 +269,9 @@ func (ms *MultiplayerServer) handleCharacterStateUpdate(w http.ResponseWriter, r
 //   - Otherwise: silently drop the row.
 //
 // The environment name is extracted from the env-scoped instanceId prefix (format: "envName::…").
+//
+// Invariant M: rows without a valid 16-float `matrix` are dropped; per-component transform
+// fields (`position`/`rotation`/`velocity`) are stripped before broadcast.
 //
 // ItemCollectionEvents are first-write-wins. Any row's claim of `isCollected=true` is
 // persisted into lastItemState so late joiners get the latest view.
@@ -273,6 +319,20 @@ func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *htt
 			if iid == "" {
 				continue
 			}
+
+			// Invariant M: every row MUST carry a matrix of length 16. Rows
+			// that are collection-only (isCollected toggling without transform)
+			// are permitted to omit matrix ONLY when isCollected is true — the
+			// receiver hides the mesh and no transform is needed.
+			if mat := coerceItemMatrix(row); mat == nil {
+				if collected, _ := row["isCollected"].(bool); !collected {
+					droppedRows++
+					continue
+				}
+			}
+			// Invariant E: never forward per-component transform fields even if
+			// a legacy client sent them alongside `matrix`.
+			stripLegacyItemTransformFields(row)
 
 			cur, exists := ms.itemOwners[iid]
 			accept := false

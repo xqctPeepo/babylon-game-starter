@@ -2,8 +2,12 @@
 // MULTIPLAYER SERIALIZATION UTILITIES
 // ============================================================================
 //
-// Rotation on the wire is **quaternion [x,y,z,w] only**. Euler angles appear only in
-// asset/config authoring — see `config_euler_rotation.ts`.
+// Character rotation on the wire is **quaternion [x,y,z,w] only**. Item / physics-object
+// transforms on the wire are a **single 4x4 world matrix** (Invariant M) —
+// see MULTIPLAYER_SYNCH.md §5.2 and the `sampleWorldMatrix` / `applyMatrixToBody` helpers
+// below. Euler angles appear only in asset/config authoring (see `config_euler_rotation.ts`)
+// and the character-sync fallback; they are NEVER read or written on item paths
+// (Invariant E).
 
 import type {
   ColorSerializable,
@@ -69,15 +73,72 @@ export function normalizeQuaternion(q: QuaternionSerializable): QuaternionSerial
   return [q[0] / length, q[1] / length, q[2] / length, q[3] / length];
 }
 
+// ----------------------------------------------------------------------------
+// Item / physics-object transform helpers (Invariants M and E)
+// ----------------------------------------------------------------------------
+
+/** World-coord clamp bound mirrored from `multiplayer_wire_guards.MAX_ABS_WORLD_COORD`. */
+const MATRIX_COORD_CLAMP = 5e6;
+
+function clampMatrixComponent(n: number): number {
+  if (!Number.isFinite(n)) {
+    return 0;
+  }
+  return Math.max(-MATRIX_COORD_CLAMP, Math.min(MATRIX_COORD_CLAMP, n));
+}
+
 /**
- * Mesh transform → multiplayer wire quaternion [x,y,z,w].
- * Prefer `rotationQuaternion`; if absent, converts Babylon’s internal Euler (`rotation`) once — **not** the wire format (multiplayer payloads are **only** quaternions; Euler belongs in asset/config only).
+ * Sample a mesh's world transform as a row-major 4x4 matrix (16 floats). This is the sole
+ * transform field carried on the item wire (Invariant M). Components are clamped to the
+ * multiplayer world-coord envelope to defend Havok from absurd payloads.
  */
-export function meshRotationToWireQuaternion(mesh: BABYLON.AbstractMesh): QuaternionSerializable {
-  const q =
-    mesh.rotationQuaternion ??
-    BABYLON.Quaternion.FromEulerAngles(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z);
-  return normalizeQuaternion(serializeQuaternion(q));
+export function sampleWorldMatrix(mesh: BABYLON.AbstractMesh): number[] {
+  const arr = mesh.computeWorldMatrix(true).asArray();
+  const out = new Array<number>(16);
+  for (let i = 0; i < 16; i++) {
+    out[i] = clampMatrixComponent(arr[i] ?? 0);
+  }
+  return out;
+}
+
+const _matrixApplyMatrix = new BABYLON.Matrix();
+const _matrixApplyScale = new BABYLON.Vector3();
+const _matrixApplyQuat = new BABYLON.Quaternion();
+const _matrixApplyPos = new BABYLON.Vector3();
+
+/**
+ * Decompose a wire 4x4 matrix and drive a kinematic physics body's target transform.
+ * Used by the item receiver path (Invariant M). The scale factor is discarded — item scale
+ * is authored per-asset and never replicated. This function NEVER touches Euler channels
+ * (Invariant E) and NEVER applies linear / angular velocity — that would violate the
+ * non-owner kinematic invariant in MULTIPLAYER_SYNCH.md §4.7.
+ */
+export function applyMatrixToBody(
+  body: BABYLON.PhysicsBody,
+  matrix: readonly number[]
+): void {
+  if (matrix.length !== 16) return;
+  BABYLON.Matrix.FromArrayToRef(matrix as number[], 0, _matrixApplyMatrix);
+  _matrixApplyMatrix.decompose(_matrixApplyScale, _matrixApplyQuat, _matrixApplyPos);
+  body.setTargetTransform(_matrixApplyPos, _matrixApplyQuat);
+}
+
+/**
+ * Mesh-only fallback for the item receiver path (Invariants M and E). Writes world
+ * position via `mesh.position` and world rotation via `mesh.rotationQuaternion` (creating
+ * the quaternion if absent). The Euler `mesh.rotation` channel is intentionally never
+ * written because that path is forbidden on item transforms.
+ */
+export function applyMatrixToMesh(
+  mesh: BABYLON.AbstractMesh,
+  matrix: readonly number[]
+): void {
+  if (matrix.length !== 16) return;
+  BABYLON.Matrix.FromArrayToRef(matrix as number[], 0, _matrixApplyMatrix);
+  _matrixApplyMatrix.decompose(_matrixApplyScale, _matrixApplyQuat, _matrixApplyPos);
+  mesh.position.copyFrom(_matrixApplyPos);
+  mesh.rotationQuaternion ??= new BABYLON.Quaternion();
+  mesh.rotationQuaternion.copyFrom(_matrixApplyQuat);
 }
 
 /**

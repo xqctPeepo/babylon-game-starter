@@ -863,6 +863,15 @@ export class SettingsUI {
     // character-state updates reported `environmentName:"RV Life"` while the server still
     // recorded `client.EnvironmentName == "Mansion"`, no [EnvSwitch] or [EnvAuthority]
     // logs, no item-state-update broadcasts, presents/cake stuck ANIMATED in-air).
+    //
+    // Invariant P (pre-scene ownership) chokepoint: `mp.switchEnvironment` awaits the
+    // server PATCH response, applies `envAuthority[newEnv]` to `ItemAuthorityTracker`,
+    // and emits the synthetic `env-item-authority-changed` — all BEFORE `loadEnvironment`
+    // runs below. By the time `CollectiblesManager.setupEnvironmentItems` spawns items,
+    // the tracker lookup registered by `multiplayer_bootstrap.ts` can resolve ownership
+    // synchronously, so each massful item is born DYNAMIC (owner) or ANIMATED (peer)
+    // without an ANIMATED-then-promote flicker. Do not move the `await` below the
+    // `loadEnvironment` call or the invariant is lost.
     try {
       const mp = getMultiplayerManager();
       if (mp.isMultiplayerActive()) {

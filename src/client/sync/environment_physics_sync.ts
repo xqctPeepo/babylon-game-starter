@@ -15,9 +15,11 @@
 // blanket non-synchronizer flip is a coarser approximation of the same invariant.
 
 import { ASSETS } from '../config/assets';
-import { deserializeQuaternion, meshRotationToWireQuaternion } from '../utils/multiplayer_serialization';
-
-import { clampCoordComponent, coerceQuaternion, coerceWorldVector3 } from './multiplayer_wire_guards';
+import {
+  applyMatrixToBody,
+  applyMatrixToMesh,
+  sampleWorldMatrix
+} from '../utils/multiplayer_serialization';
 
 import type { ItemInstanceState } from '../types/multiplayer';
 
@@ -43,28 +45,10 @@ export function meshNameFromEnvironmentInstanceId(
   return rest.trim() !== '' ? rest : null;
 }
 
-function velocityFromPhysicsBody(mesh: BABYLON.AbstractMesh): [number, number, number] {
-  const node = mesh as BABYLON.TransformNode & {
-    physicsBody?: BABYLON.PhysicsBody;
-  };
-  const body = node.physicsBody;
-  if (!body || body.isDisposed) {
-    return [0, 0, 0];
-  }
-  try {
-    const v = body.getLinearVelocity();
-    return [
-      clampCoordComponent(v.x),
-      clampCoordComponent(v.y),
-      clampCoordComponent(v.z)
-    ];
-  } catch {
-    return [0, 0, 0];
-  }
-}
-
 /**
  * Builds serializable snapshots for configured environment physics meshes (mass > 0).
+ * Each row carries exactly one transform field: a 16-float row-major world matrix
+ * (Invariant M; no Euler, no separate velocity — see MULTIPLAYER_SYNCH.md §5.2).
  */
 export function sampleEnvironmentPhysicsStates(
   scene: BABYLON.Scene,
@@ -87,36 +71,10 @@ export function sampleEnvironmentPhysicsStates(
       continue;
     }
 
-    let wx: number;
-    let wy: number;
-    let wz: number;
-    try {
-      if (mesh.getAbsolutePosition) {
-        const p = mesh.getAbsolutePosition();
-        wx = p.x;
-        wy = p.y;
-        wz = p.z;
-      } else {
-        wx = mesh.absolutePosition.x;
-        wy = mesh.absolutePosition.y;
-        wz = mesh.absolutePosition.z;
-      }
-    } catch {
-      continue;
-    }
-
-    const pos: [number, number, number] = [
-      clampCoordComponent(wx),
-      clampCoordComponent(wy),
-      clampCoordComponent(wz)
-    ];
-
     out.push({
       instanceId: makeEnvironmentPhysicsInstanceId(environmentName, po.name),
       itemName: ENV_PHYSICS_ITEM_MARKER,
-      position: pos,
-      rotation: meshRotationToWireQuaternion(mesh),
-      velocity: velocityFromPhysicsBody(mesh),
+      matrix: sampleWorldMatrix(mesh),
       isCollected: false,
       timestamp: ts
     });
@@ -126,7 +84,10 @@ export function sampleEnvironmentPhysicsStates(
 }
 
 /**
- * Applies authoritative transform/velocity onto a replicated environment body.
+ * Applies an authoritative 4x4 world-matrix snapshot onto a replicated environment body.
+ * Per MULTIPLAYER_SYNCH.md §4.7 (non-owner kinematic invariant) and Invariants M/E, the
+ * receiver decomposes the matrix and calls `body.setTargetTransform(pos, quat)`. It MUST
+ * NOT call `setLinearVelocity` / `setAngularVelocity` — non-owner bodies are ANIMATED.
  * Synchronizer skips this path (does not apply its own echoed updates).
  */
 export function applyRemoteEnvironmentPhysicsState(
@@ -142,14 +103,11 @@ export function applyRemoteEnvironmentPhysicsState(
     return;
   }
 
-  const posTri = coerceWorldVector3(state.position);
-  const rotQ = coerceQuaternion(state.rotation);
-  const velTri = coerceWorldVector3(state.velocity);
-  if (!posTri || !rotQ || !velTri) {
+  if (state.itemName !== ENV_PHYSICS_ITEM_MARKER) {
     return;
   }
 
-  if (state.itemName !== ENV_PHYSICS_ITEM_MARKER) {
+  if (!Array.isArray(state.matrix) || state.matrix.length !== 16) {
     return;
   }
 
@@ -163,30 +121,19 @@ export function applyRemoteEnvironmentPhysicsState(
     return;
   }
 
-  const pos = new BABYLON.Vector3(posTri[0], posTri[1], posTri[2]);
-  const quat = deserializeQuaternion(rotQ);
-
   const node = mesh as BABYLON.TransformNode & {
     physicsBody?: BABYLON.PhysicsBody;
   };
   const body = node.physicsBody;
 
-  if (body && !body.isDisposed) {
-    try {
-      body.setTargetTransform(pos, quat);
-      body.setLinearVelocity(new BABYLON.Vector3(velTri[0], velTri[1], velTri[2]));
-      body.setAngularVelocity(BABYLON.Vector3.Zero());
-    } catch {
-      /* Havok/plugin edge — skip frame */
+  try {
+    if (body && !body.isDisposed) {
+      applyMatrixToBody(body, state.matrix);
+    } else {
+      applyMatrixToMesh(mesh, state.matrix);
     }
-  } else {
-    try {
-      mesh.position.copyFrom(pos);
-      mesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
-      mesh.rotationQuaternion.copyFrom(quat);
-    } catch {
-      /* skip */
-    }
+  } catch {
+    /* Havok/plugin edge — skip frame */
   }
 }
 

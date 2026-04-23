@@ -19,12 +19,9 @@
 // claim/release and owner-check logic on top of this module.
 
 import { CollectiblesManager } from '../managers/collectibles_manager';
-import {
-  meshRotationToWireQuaternion
-} from '../utils/multiplayer_serialization';
+import { sampleWorldMatrix } from '../utils/multiplayer_serialization';
 
 import { ItemSync } from './item_sync';
-import { clampCoordComponent } from './multiplayer_wire_guards';
 
 import type { ItemCollectionEvent, ItemInstanceState } from '../types/multiplayer';
 
@@ -50,41 +47,12 @@ export function parseEnvScopedInstanceId(
   return { envName, localId };
 }
 
-function velocityFromAggregate(
-  body: BABYLON.PhysicsAggregate | null
-): [number, number, number] {
-  if (!body || body.body.isDisposed) {
-    return [0, 0, 0];
-  }
-  try {
-    const v = body.body.getLinearVelocity();
-    return [
-      clampCoordComponent(v.x),
-      clampCoordComponent(v.y),
-      clampCoordComponent(v.z)
-    ];
-  } catch {
-    return [0, 0, 0];
-  }
-}
-
-function absolutePositionTriplet(
-  mesh: BABYLON.AbstractMesh
-): [number, number, number] | null {
-  try {
-    const p = mesh.getAbsolutePosition ? mesh.getAbsolutePosition() : mesh.absolutePosition;
-    return [clampCoordComponent(p.x), clampCoordComponent(p.y), clampCoordComponent(p.z)];
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Builds `ItemInstanceState` rows for every collectible + non-collectible physics item
- * tracked by the CollectiblesManager. Uses env-scoped instance ids so non-synchronizer
- * clients filter by their current environment, and preserves the config `name` on the
- * wire's `itemName` field so the routing in the bootstrap can distinguish these rows
- * from `ENV_PHYSICS_ITEM_MARKER` rows.
+ * tracked by the CollectiblesManager. Each row carries a single 4x4 world matrix field
+ * per Invariants M and E in MULTIPLAYER_SYNCH.md §5.2; no separate position / rotation /
+ * velocity fields, and no Euler reads on the sample path. Env-scoped instance ids let
+ * peers filter by their current environment.
  */
 export function sampleConfiguredItems(
   environmentName: string
@@ -105,16 +73,10 @@ export function sampleConfiguredItems(
       return;
     }
     const isCollected = CollectiblesManager.isCollectedInstance(id);
-    const pos = absolutePositionTriplet(mesh);
-    if (!pos) {
-      return;
-    }
     out.push({
       instanceId: envScopedInstanceId(environmentName, id),
       itemName: entry.config.name,
-      position: pos,
-      rotation: meshRotationToWireQuaternion(mesh),
-      velocity: isCollected ? [0, 0, 0] : velocityFromAggregate(entry.body),
+      matrix: sampleWorldMatrix(mesh),
       isCollected,
       timestamp: ts
     });

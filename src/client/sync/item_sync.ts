@@ -16,7 +16,11 @@
 // `configured_items_sync.ts`) decide whether the local client currently owns an instanceId
 // and may publish rows for it.
 
-import { deserializeQuaternion, ThrottledFunction } from '../utils/multiplayer_serialization';
+import {
+  applyMatrixToBody,
+  applyMatrixToMesh,
+  ThrottledFunction
+} from '../utils/multiplayer_serialization';
 
 import type { ItemInstanceState, ItemStateUpdate, ItemCollectionEvent } from '../types/multiplayer';
 
@@ -84,16 +88,17 @@ export class ItemSync {
   }
 
   /**
-   * Applies remote item state to a mesh (and optionally teleports its physics body).
+   * Applies a remote item snapshot to a mesh (and its kinematic physics body if present).
    *
-   * Applied properties:
-   * - Position
-   * - Rotation (quaternion [x, y, z, w] wire format only)
-   * - Collection status (visibility + enabled)
+   * Wire contract (Invariants M and E, MULTIPLAYER_SYNCH.md §5.2): `state.matrix` is the
+   * sole transform field — a 16-float row-major world matrix. The receiver decomposes it
+   * into position + quaternion (scale discarded) and:
+   *   - drives `body.setTargetTransform(pos, quat)` when a non-disposed body exists;
+   *   - else writes `mesh.position` + `mesh.rotationQuaternion` directly.
    *
-   * When `body` is provided and the item is not collected, the physics body is teleported
-   * to the authoritative transform and its velocities are zeroed so the local simulation
-   * does not fight the remote state.
+   * The applier MUST NOT call `setLinearVelocity` / `setAngularVelocity` — non-owner
+   * bodies are ANIMATED (kinematic) per the non-owner kinematic invariant (§4.7). Euler
+   * channels (`mesh.rotation`) are never written on this path.
    */
   public static applyRemoteItemState(
     itemMesh: BABYLON.AbstractMesh,
@@ -102,41 +107,33 @@ export class ItemSync {
   ): void {
     if (!itemMesh) return;
 
-    const pos = new BABYLON.Vector3(state.position[0], state.position[1], state.position[2]);
-    let quat: BABYLON.Quaternion;
-    try {
-      quat = deserializeQuaternion(state.rotation);
-    } catch (e) {
-      console.warn('[ItemSync] Failed to deserialize rotation:', e);
-      quat = new BABYLON.Quaternion(0, 0, 0, 1);
-    }
-
     const physicsBody =
       body && !body.body.isDisposed ? body.body : this.resolveMeshPhysicsBody(itemMesh);
 
-    if (physicsBody && !state.isCollected) {
-      try {
-        physicsBody.setTargetTransform(pos, quat);
-        physicsBody.setLinearVelocity(
-          new BABYLON.Vector3(state.velocity[0], state.velocity[1], state.velocity[2])
-        );
-        physicsBody.setAngularVelocity(BABYLON.Vector3.Zero());
-      } catch {
+    if (!state.isCollected) {
+      if (!Array.isArray(state.matrix) || state.matrix.length !== 16) {
+        // Collection status still needs to be applied below.
+      } else if (physicsBody && !physicsBody.isDisposed) {
         try {
-          itemMesh.position.copyFrom(pos);
-          itemMesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
-          itemMesh.rotationQuaternion.copyFrom(quat);
+          applyMatrixToBody(physicsBody, state.matrix);
         } catch (e) {
-          console.warn('[ItemSync] Fallback transform apply failed:', e);
+          try {
+            applyMatrixToMesh(itemMesh, state.matrix);
+          } catch (fallbackError) {
+            console.warn(
+              '[ItemSync] Fallback matrix apply failed:',
+              fallbackError,
+              'original:',
+              e
+            );
+          }
         }
-      }
-    } else {
-      try {
-        itemMesh.position.copyFrom(pos);
-        itemMesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
-        itemMesh.rotationQuaternion.copyFrom(quat);
-      } catch (e) {
-        console.warn('[ItemSync] Failed to apply transform:', e);
+      } else {
+        try {
+          applyMatrixToMesh(itemMesh, state.matrix);
+        } catch (e) {
+          console.warn('[ItemSync] Failed to apply matrix:', e);
+        }
       }
     }
 

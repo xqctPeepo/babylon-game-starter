@@ -150,9 +150,11 @@ Re-entry is a normal arrival: returning to an env you previously held authority 
 
 #### Item Transform Dirty Filter (pseudo-code)
 
+Item rows carry a single transform field — `Matrix [16]float64`, the row-major 4x4 world matrix (Invariant M in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state)). No `Position`, no `Rotation`, no `Velocity`. The dirty filter therefore reduces to a single 16-element epsilon comparator.
+
 ```go
 type cachedItemTransform struct {
-  position, rotation, velocity [3]float64
+  matrix                        [16]float64
   isCollected                   bool
   collectedByClientID           string
   ownerClientID                 string
@@ -160,14 +162,10 @@ type cachedItemTransform struct {
 }
 // map[instanceId] cachedItemTransform lives on the MultiplayerServer.
 
-const (
-  positionEpsilon = 1e-3
-  rotationEpsilon = 1e-3
-  velocityEpsilon = 1e-3
-)
+const matrixEpsilon = 1e-4 // unitless; matrix entries mix meters and direction cosines
 
-func vecDirty(a, b [3]float64, eps float64) bool {
-  for i := 0; i < 3; i++ { if math.Abs(a[i]-b[i]) > eps { return true } }
+func matrixDirty(a, b [16]float64) bool {
+  for i := 0; i < 16; i++ { if math.Abs(a[i]-b[i]) > matrixEpsilon { return true } }
   return false
 }
 
@@ -176,9 +174,7 @@ func (ms *MultiplayerServer) applyDirtyFilter(rows []ItemInstanceState) []ItemIn
   for _, r := range rows {
     cached, ok := ms.itemTransformCache[r.InstanceID]
     dirty := !ok ||
-      vecDirty(cached.position, r.Position, positionEpsilon) ||
-      vecDirty(cached.rotation, r.Rotation, rotationEpsilon) ||
-      vecDirty(cached.velocity, r.Velocity, velocityEpsilon) ||
+      matrixDirty(cached.matrix, r.Matrix) ||
       cached.isCollected != r.IsCollected ||
       cached.collectedByClientID != r.CollectedByClientID ||
       cached.ownerClientID != r.OwnerClientID
@@ -329,6 +325,14 @@ function applyItemSnapshot(update: ItemStateUpdate): void {
   }
 
   // 2. Updates — drop self-owned rows (defense-in-depth); non-owned rows via kinematic target.
+  //    Each row carries exactly one transform field: row.matrix (16 floats, row-major;
+  //    Invariant M). We decompose locally and pass position + quaternion to the
+  //    kinematic-target API. We NEVER touch mesh.rotation (Euler) on this path
+  //    (Invariant E) and NEVER call setLinearVelocity / applyImpulse / addForce
+  //    on a non-owned body.
+  const scratchPos = new BABYLON.Vector3();
+  const scratchQuat = new BABYLON.Quaternion();
+  const scratchScale = new BABYLON.Vector3();
   for (const row of update.updates ?? []) {
     if (authorityTracker.isOwnedBySelf(row.instanceId)) {
       continue; // server should never send this under owner-pin; drop if it does
@@ -336,8 +340,8 @@ function applyItemSnapshot(update: ItemStateUpdate): void {
     const body = collectiblesManager.getPhysicsBody(row.instanceId);
     if (!body) continue;
     CollectiblesManager.setItemKinematic(row.instanceId, true);
-    body.setTargetTransform(toVec3(row.position), toQuat(row.rotation));
-    // DO NOT setLinearVelocity / applyImpulse / addForce on non-owned bodies.
+    BABYLON.Matrix.FromArray(row.matrix).decompose(scratchScale, scratchQuat, scratchPos);
+    body.setTargetTransform(scratchPos, scratchQuat);
   }
 }
 
@@ -377,15 +381,21 @@ function onEnvironmentLoaded(envName: string): void {
 }
 
 // §6.2 rule 5. Re-derive motion type for every item in env, atomically per-item.
-// Called on env-load bootstrap completion, on authority-snapshot application,
-// and on env-item-authority-changed covering the currently loaded env.
+// This is the DEFENSE-IN-DEPTH belt that handles (a) authority changes mid-session
+// and (b) the single-player / mp-disabled fallback. The primary path is
+// pre-scene ownership resolution (Invariant P): MultiplayerManager.switchEnvironment
+// applies envAuthority for the new env before sceneManager.loadEnvironment, and
+// CollectiblesManager.createCollectibleInstance spawns each body DYNAMIC or
+// ANIMATED directly, removing the need for any promote step in the happy path.
 function seedMotionTypesForEnv(envName: string): void {
   for (const item of itemsInEnv(envName)) {
     const ownedBySelf = authorityTracker.isOwnedBySelf(item.instanceId);
     CollectiblesManager.setItemKinematic(item.instanceId, !ownedBySelf);
     if (!ownedBySelf) {
       // Seed kinematic target to current world pose so the body does not drift
-      // between the flip and the first applied updates[] row.
+      // between the flip and the first applied updates[] row. The absolute
+      // rotation is sampled as a quaternion (Invariant E: we never touch
+      // mesh.rotation Euler channels on item paths).
       const body = collectiblesManager.getPhysicsBody(item.instanceId);
       const mesh = collectiblesManager.getMesh(item.instanceId);
       if (body && mesh) {
@@ -610,7 +620,7 @@ private updateCharacterState(): void {
 
 #### Item Sync Integration
 
-Items use a **three-tier authority model** — see [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) and [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle). Collection events are first-write-wins, so any client may emit them. Transform / velocity rows must come from the item's **resolved owner**:
+Items use a **three-tier authority model** — see [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) and [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle). Collection events are first-write-wins, so any client may emit them. Transform rows (each carrying a single `matrix: [16]float64` per Invariant M) must come from the item's **resolved owner**:
 
 1. The **explicit item owner** (an active `itemOwners` entry from proximity claims), if any.
 2. Otherwise, the **environment item authority** for the item's environment — the first-in-env client, with ordered failover.
@@ -654,7 +664,7 @@ private publishOwnedItemStates(): void {
 }
 ```
 
-Per-row authorization is enforced by the server ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)) — unauthorized rows are silently dropped rather than failing the whole PATCH. The server additionally applies a **dirty filter** to the surviving rows ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): rows whose position/rotation/velocity and categorical fields are within epsilon of the cached value are dropped from the broadcast. Clients SHOULD still filter locally (send at most ~10 Hz, skip rows that haven't changed beyond a local threshold) to avoid wasted upstream bandwidth; the server-side filter is a safety net, not a substitute.
+Per-row authorization is enforced by the server ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)) — unauthorized rows are silently dropped rather than failing the whole PATCH. The server additionally applies a **dirty filter** to the surviving rows ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): rows whose `matrix` (16-float row-major world matrix) is within `matrixEpsilon` element-wise of the cached value AND whose categorical fields match exactly are dropped from the broadcast. Clients SHOULD still filter locally (send at most ~10 Hz, skip rows that haven't changed beyond a local threshold) to avoid wasted upstream bandwidth; the server-side filter is a safety net, not a substitute.
 
 #### Effects Sync Integration
 
@@ -828,6 +838,26 @@ Last-claim-wins with the guardrails in [§4.7](MULTIPLAYER_SYNCH.md#47-item-auth
 
 Use the `ItemAuthorityTracker` resolver — or the per-row `ownerClientId` in incoming `item-state-update` payloads — to check ownership; do **not** use `mp.isSynchronizer()` for item decisions.
 
+### Env-switch pre-scene flow (Invariant P)
+
+The client side honours [Invariant P](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle) by running env-switch as a strict sequence, with the authority map applied to `ItemAuthorityTracker` **before** any item body for the new environment is created. The chokepoint is `SettingsUI.changeEnvironment`:
+
+```typescript
+// SettingsUI.changeEnvironment (simplified)
+await mp.switchEnvironment(newEnv);
+// At this point the server's env-switch PATCH response has been parsed,
+// st.environment = newEnv, and a synthetic env-item-authority-changed has
+// already been fed into ItemAuthorityTracker via the listener hoisted above
+// mp.join(). isOwnedBySelf(instanceId) now returns the final answer for
+// every item in newEnv.
+await sceneManager.loadEnvironment(newEnv);
+// setupEnvironmentItems() calls CollectiblesManager.createCollectibleInstance
+// for each item; each body is created DYNAMIC if isOwnedBySelf returns true
+// and ANIMATED otherwise — no transient ANIMATED-then-promote flicker.
+```
+
+`MultiplayerManager.switchEnvironment` emits the synthetic `env-item-authority-changed` before its promise resolves; callers MUST NOT begin scene loading before that promise has settled. `CollectiblesManager` consults the tracker through a static `isOwnedBySelfLookup` callback registered by `multiplayer_bootstrap.ts` (and cleared on scene dispose) so that the manager stays tracker-agnostic. `seedMotionTypesForEnv` and `CollectiblesManager.onEnvironmentItemsReady` remain wired as **defense-in-depth** for the cases where the callback is unset (single-player, mp disabled, late authority signal); in the conforming happy path they are no-ops.
+
 ### State Update Throttling
 
 Each sync module uses `ThrottledFunction` to limit update frequency:
@@ -904,7 +934,7 @@ new SkySync(100);
 
 1. **Base-synchronizer-only global world state**: lights / sky / env particles require `X-Client-ID == baseSynchronizerId`; other senders get `403 Forbidden` ([§7.2](MULTIPLAYER_SYNCH.md#72-global-world-state-authorization)).
 2. **Three-tier item authorization**: item-state rows are filtered per `instanceId` by resolved owner — explicit `itemOwners` entry first, else `envAuthority` for the item's environment, else drop ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)). Rows that fail the filter are dropped silently rather than failing the whole request. Base-synchronizer role alone confers **no** item write privilege.
-3. **Server-side dirty filter**: surviving rows are compared field-by-field (with per-component epsilons) to the server's `itemTransformCache`; unchanged repeats are silently dropped from the broadcast without affecting activity tracking ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)).
+3. **Server-side dirty filter**: surviving rows are compared to the server's `itemTransformCache` via a single 16-float `matrixEpsilon` element-wise comparator on the `matrix` field (Invariant M) plus exact-match on categorical fields; unchanged repeats are silently dropped from the broadcast without affecting activity tracking ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)).
 4. **Timestamp Validation**: Rejects updates older than 30 seconds.
 5. **Position Bounds**: Validates positions within ±10000 units.
 6. **Animation State**: Only accepts valid animation states.
@@ -928,12 +958,10 @@ new SkySync(100);
 
 ### Server-Side Dirty Filter (Item Transforms)
 
-The server runs a second-stage filter after authority row filtering ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): accepted `ItemInstanceState` rows are compared against the last-broadcast cached values for the same `instanceId`. Rows whose `position`, `rotation`, `velocity` components all fall within the per-component epsilons AND whose categorical fields (`isCollected`, `collectedByClientId`, `ownerClientId`) are exactly equal are considered CLEAN and dropped from the outgoing broadcast.
+The server runs a second-stage filter after authority row filtering ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): accepted `ItemInstanceState` rows are compared against the last-broadcast cached values for the same `instanceId`. Rows whose `matrix` (16-float row-major world matrix, Invariant M) falls within `matrixEpsilon` element-wise AND whose categorical fields (`isCollected`, `collectedByClientId`, `ownerClientId`) are exactly equal are considered CLEAN and dropped from the outgoing broadcast.
 
-Defaults:
-- `positionEpsilon = 1e-3` meters
-- `rotationEpsilon = 1e-3` radians
-- `velocityEpsilon = 1e-3` meters/second
+Default:
+- `matrixEpsilon = 1e-4` (unitless; matrix entries mix meters and direction cosines, so a single tolerance covers both).
 
 Activity bookkeeping (`itemOwners.lastUpdatedAt`) is refreshed for CLEAN rows too — only the broadcast is suppressed. Late joiners are seeded by the **per-client freshness matrix AOI-enter** hook ([§5.2.2](MULTIPLAYER_SYNCH.md#522-per-client-freshness-matrix) rule 4): every item cell for the arriving client is initialized to `stale`, so the next broadcast window emits a per-recipient `item-state-update` containing the full `itemTransformCache` for the arrived env plus any undelivered collection events. There is no separate SSE-open replay code path.
 
@@ -1063,7 +1091,7 @@ Diagnostic:
 - Confirm that on receiving env-authority the client flipped item bodies in that env to `DYNAMIC` (`PhysicsMotionType.DYNAMIC`) and resumed sampling.
 
 ### Item rows reach the server but never appear on peers
-- Accepted rows may still be dropped by the **server-side dirty filter** if their position/rotation/velocity and categorical fields haven't changed beyond epsilon. Confirm the values genuinely differ from the cached state — temporarily lower the server epsilons or inject a large test displacement to verify broadcast path.
+- Accepted rows may still be dropped by the **server-side dirty filter** if the row's `matrix` is element-wise within `matrixEpsilon` of the cached value AND its categorical fields match. Confirm the values genuinely differ from the cached state — temporarily lower `matrixEpsilon` or inject a large test displacement to verify the broadcast path.
 - A client that enters an env and does not see any items usually indicates the **freshness matrix AOI-enter** hook was not invoked for that session's current env — verify `onEnvEnter` runs on initial join, on server-observed env switch, and on SSE reconnect.
 
 ### Env-authority's own items hover / oscillate / fall in slow motion
@@ -1080,6 +1108,14 @@ Symptom: P2 joins an environment after P1 has it settled; items appear to spin, 
 Diagnostic:
 - P2's local physics loop is ticking before the bootstrap `item-state-update` has been applied. Confirm `onEnvironmentLoaded` pauses the env-physics loop, holds every env item in `ANIMATED` motion type, and resumes only after the first `item-state-update` addressed to P2 for this env is applied.
 - Confirm the server emits a bootstrap per-recipient `item-state-update` on AOI enter. Under the freshness matrix that burst arrives in the first broadcast window after `onEnvEnter`; if it does not, check that `onEnvEnter` was called for P2 when P2 joined the env.
+
+### Cake hovers or presents whip around chaotically on non-owner (cake hovering / presents whipping)
+Symptom: On P1 the cake falls and settles; on P2 the same items visibly thrash / whip / spin despite P1 not touching them. Classic rotation-representation ambiguity.
+
+Diagnostic:
+- Confirm the wire payload carries `matrix: [16 floats]` per row and does NOT carry any of `position`, `rotation`, `velocity`, or a quaternion tuple (Invariant M). Any remnant of the per-component schema will cause the owner's sampler and the non-owner's applier to disagree about which rotation channel is authoritative.
+- Confirm `ItemSync.applyRemoteItemState` calls `body.setTargetTransform(pos, quat)` after decomposing the incoming matrix, and does NOT call `setLinearVelocity` / `setAngularVelocity` on non-owned bodies. Kinematic bodies receiving both a target transform and a velocity will produce exactly the whipping symptom as the velocity integration fights the target.
+- Confirm no code path writes `mesh.rotation.x/y/z` (Euler) on any item mesh (Invariant E). Legacy "spin in place" animations on collectibles (see `CollectiblesManager.addRotationAnimation`) MUST be quaternion-based (`rotationQuaternion.multiplyInPlace(dq)`) and MUST be gated to massless (`instance.mass === 0`) items so they never conflict with a kinematic target.
 
 ### Peers do not see collected items disappear
 Symptom: P1 collects a present; P2's view still shows the present on the floor.

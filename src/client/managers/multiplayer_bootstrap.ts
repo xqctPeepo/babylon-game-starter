@@ -200,14 +200,50 @@ export async function initMultiplayerAfterCharacterReady(
     }
   };
 
-  // Default every dynamic item in the current env to its resolved motion type via the
-  // three-tier rule (§4). Called on SSE-open authority snapshot, env load/switch, and
-  // right after setSelfClientId so tier-2 resolution works.
+  // Defense-in-depth: primary motion-type assignment happens at spawn time in
+  // `CollectiblesManager.createCollectibleInstance` / `createPhysicsInstance` via the
+  // `resolveInitialOwnership` callback registered below (Invariant P —
+  // MULTIPLAYER_SYNCH.md §4.8). This helper still runs on SSE-open authority snapshot,
+  // env load/switch, and right after `setSelfClientId` to catch items whose authority
+  // could not be resolved at spawn (late-arriving snapshots, items created before the
+  // tracker was ready, env re-entries).
   const seedMotionTypesForEnv = (envName: string): void => {
     if (!envName || !sceneManager.isEnvironmentLoaded()) {
       return;
     }
     for (const [localId] of CollectiblesManager.getPhysicsItemEntries()) {
+      const instanceId = envScopedInstanceId(envName, localId);
+      const dyn = authorityTracker.isOwnedBySelf(instanceId);
+      CollectiblesManager.setItemKinematic(localId, !dyn);
+    }
+    // Fix 8 (seed collectibles). MULTIPLAYER_SYNCH.md §6.2 rule 4 "ANIMATED-default-
+    // then-promote" applies to EVERY massful physics item in the env, including
+    // collectibles (presents). `CollectiblesManager` tracks collectibles and
+    // non-collectible physics items in two separate maps; the loop above only walks
+    // the latter. Without this second loop, presents get the ANIMATED safety belt
+    // in `createCollectibleInstance` but nothing ever promotes them to DYNAMIC on
+    // the resolved owner, leaving them frozen in the air forever. Parity with
+    // `configured_items_sync.ts` which already walks both iterators when sampling.
+    //
+    // Massless guard: a mass=0 collectible body is STATIC, and promoting STATIC to
+    // DYNAMIC in Havok is meaningless (no mass = no integration). The physics-items
+    // loop above lacks this guard in practice because every registered physics item
+    // has mass > 0, but collectibles can legitimately be massless pickups, so we
+    // filter on the current motion type being ANIMATED or DYNAMIC — i.e., a body
+    // that went through the ANIMATED-default safety belt and is eligible for the
+    // authority-driven flip.
+    for (const [localId, entry] of CollectiblesManager.getCollectibleEntries()) {
+      const phys = entry.body?.body;
+      if (!phys || phys.isDisposed) {
+        continue;
+      }
+      const current = phys.getMotionType();
+      if (
+        current !== BABYLON.PhysicsMotionType.ANIMATED &&
+        current !== BABYLON.PhysicsMotionType.DYNAMIC
+      ) {
+        continue;
+      }
       const instanceId = envScopedInstanceId(envName, localId);
       const dyn = authorityTracker.isOwnedBySelf(instanceId);
       CollectiblesManager.setItemKinematic(localId, !dyn);
@@ -359,6 +395,25 @@ export async function initMultiplayerAfterCharacterReady(
   }
 
   authorityTracker.setSelfClientId(clientId);
+
+  // Invariant P (MULTIPLAYER_SYNCH.md §4.8 "pre-scene ownership"): register the
+  // tracker lookup that `CollectiblesManager.createCollectibleInstance` /
+  // `createPhysicsInstance` consult at spawn time so each massful item is born in its
+  // final motion type. `seedMotionTypesForEnv` + `onEnvironmentItemsReady` remain as
+  // defense-in-depth for unresolved / late-arriving authority.
+  CollectiblesManager.resolveInitialOwnership = (envScopedInstanceId: string): boolean | null => {
+    if (!authorityTracker.getSelfClientId()) {
+      return null;
+    }
+    const parsed = parseEnvScopedInstanceId(envScopedInstanceId);
+    if (!parsed) {
+      return null;
+    }
+    if (!authorityTracker.hasSnapshotAppliedFor(parsed.envName)) {
+      return null;
+    }
+    return authorityTracker.isOwnedBySelf(envScopedInstanceId);
+  };
 
   // MULTIPLAYER_SYNCH.md §4.5 SSE-open ordering: by the time `mp.join()` resolves,
   // the server has had the opportunity to replay `pushAuthoritySnapshotToSession` on
@@ -657,6 +712,9 @@ export async function initMultiplayerAfterCharacterReady(
     }
     if (CollectiblesManager.onEnvironmentItemsReady) {
       CollectiblesManager.onEnvironmentItemsReady = null;
+    }
+    if (CollectiblesManager.resolveInitialOwnership) {
+      CollectiblesManager.resolveInitialOwnership = null;
     }
   });
 }

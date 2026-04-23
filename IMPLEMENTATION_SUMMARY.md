@@ -4,6 +4,8 @@
 **Completion Date:** April 20, 2026  
 **Total Implementation:** 1,040 lines of code + 1,356 lines of documentation
 
+> **Item transform wire is matrix-only (Invariant M) and Euler-free (Invariant E).** `ItemInstanceState` on the wire carries a single `matrix: readonly number[]` field of length 16 — the row-major 4x4 world matrix. The Euler / quaternion helpers enumerated below are used by character sync; item sync uses `sampleWorldMatrix(mesh)` (owner) and `applyMatrixToBody(body, matrix)` (non-owner) in `src/client/utils/multiplayer_serialization.ts`. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state).
+
 ---
 
 ## What Was Delivered
@@ -54,7 +56,7 @@
 **File:** `src/client/sync/item_sync.ts`
 
 ✅ **Implementation**
-- `applyRemoteItemState()` - Position, rotation, visibility
+- `applyRemoteItemState()` - 4x4 world matrix decomposed → `setTargetTransform(pos, quat)` on kinematic body; visibility for collection
 - Collection status → mesh visibility binding
 - `markItemCollected()` - State management
 - `removeItemState()` - Cleanup
@@ -160,7 +162,7 @@
 
 ### Completeness
 - ✅ Characters: Position, rotation, velocity, animation, boost
-- ✅ Items: Position, rotation, velocity, collection status
+- ✅ Items: 4x4 world matrix (Invariants M/E — 16 floats, row-major; no Euler, no velocity on item paths), collection status
 - ✅ Lights: All properties, type-specific handling
 - ✅ Particles: Position, active state
 - ✅ Sky: Effect type, intensity, duration

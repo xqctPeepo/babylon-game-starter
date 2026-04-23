@@ -3,6 +3,8 @@
 **Date:** April 20, 2026  
 **Status:** ✅ **COMPLETE & PRODUCTION READY**
 
+> **Item transform wire migrated to matrix-only (Invariants M/E).** As of the matrix-only wire migration, `ItemInstanceState` on the wire carries exactly one transform field: `matrix` (row-major 4x4 world matrix, 16 floats). The `position` / `rotation` / `velocity` / Euler helpers described below remain in use for **character sync**; item sync uses `sampleWorldMatrix(mesh)` and `applyMatrixToBody(body, matrix)` in `multiplayer_serialization.ts`. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state).
+
 ---
 
 ## Executive Summary
@@ -239,7 +241,7 @@ SERIALIZATION_GUIDE.md (862 lines)
 
 ✅ **All serialization paths are complete and validated**
 - Characters: Position, rotation, velocity, animation, boost
-- Items: Position, rotation, velocity, collection status
+- Items: 4x4 world matrix (Invariant M — 16 floats, row-major), collection status
 - Lights: Intensity, color, position, direction, type-specific props
 - Effects: Position, active status
 - Sky: Effect type, intensity, duration

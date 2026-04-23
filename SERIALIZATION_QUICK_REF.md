@@ -2,6 +2,8 @@
 
 **TL;DR:** All transforms are properly serialized, deserialized, and applied to meshes with full validation.
 
+> **Item / physics-object wire is matrix-only.** Per Invariants M and E in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state), every `ItemInstanceState` row carries exactly one transform field — `matrix: readonly number[]` of length 16 (row-major 4x4 world matrix, produced by `mesh.computeWorldMatrix(true).asArray()`). No `position`, no `rotation`, no `velocity`, and no Euler angles on item paths. The Euler / quaternion serializers below are used by **character sync only**; item sync uses `sampleWorldMatrix` and `applyMatrixToBody` in `multiplayer_serialization.ts`.
+
 ---
 
 ## Quick Start
@@ -15,13 +17,19 @@ const state = characterSync.sampleState(Date.now());
 CharacterSync.applyRemoteCharacterState(remoteMesh, state);
 ```
 
-### Item State
+### Item State (matrix-only, Invariant M)
 ```typescript
-// Track item
-itemSync.updateItemState({ position: [1,2,3], rotation: [0,1,0], isCollected: false });
+// Owner: sample world matrix, publish row.
+itemSync.updateItemState({
+  instanceId: 'rv-life:present-1',
+  itemName: 'present',
+  matrix: sampleWorldMatrix(presentMesh), // length 16, row-major
+  isCollected: false,
+  timestamp: Date.now(),
+});
 
-// Apply to item mesh
-ItemSync.applyRemoteItemState(itemMesh, itemState);
+// Non-owner: decompose and apply to kinematic body.
+ItemSync.applyRemoteItemState(itemMesh, itemState); // internally calls applyMatrixToBody
 ```
 
 ### Light State
@@ -37,13 +45,14 @@ LightsSync.applyRemoteLightState(babylonLight, lightState);
 
 ## Serialization Formats
 
-| Type | Format | Example |
-|------|--------|---------|
-| Vector3 | `[x, y, z]` | `[10.5, 5.2, -15.3]` |
-| Quaternion | `[x, y, z, w]` | `[0.1, 0.2, 0.3, 0.92]` |
-| Euler (Radians) | `[x, y, z]` | `[0.1, 1.5, -0.2]` |
-| Color3 | `[r, g, b]` | `[1.0, 0.5, 0.2]` |
-| Color4 | `[r, g, b, a]` | `[1.0, 0.5, 0.2, 0.8]` |
+| Type | Format | Example | Used by |
+|------|--------|---------|---------|
+| Vector3 | `[x, y, z]` | `[10.5, 5.2, -15.3]` | characters, effects, lights |
+| Quaternion | `[x, y, z, w]` | `[0.1, 0.2, 0.3, 0.92]` | characters |
+| Euler (Radians) | `[x, y, z]` | `[0.1, 1.5, -0.2]` | characters (legacy; avoid on any new path) |
+| World matrix | `[m00…m33]` (16 floats, row-major) | `[1,0,0,0, 0,1,0,0, 0,0,1,0, 10.5,5.2,-15.3,1]` | **items / physics objects only** (Invariant M) |
+| Color3 | `[r, g, b]` | `[1.0, 0.5, 0.2]` | all |
+| Color4 | `[r, g, b, a]` | `[1.0, 0.5, 0.2, 0.8]` | all |
 
 ---
 

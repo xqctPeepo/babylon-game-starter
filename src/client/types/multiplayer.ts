@@ -71,27 +71,39 @@ export interface CharacterState {
 // ============================================================================
 
 /**
- * One row of item replication state. See {@link https://github.com | MULTIPLAYER_SYNCH.md §8.2}
- * for the normative shape. Under the per-item authority model
- * ([MULTIPLAYER_SYNCH.md §4.7](../../../MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle)):
+ * One row of item replication state. See
+ * [MULTIPLAYER_SYNCH.md §5.2 / §8.2](../../../MULTIPLAYER_SYNCH.md#52-item-state)
+ * for the normative shape.
+ *
+ * **Invariant M (matrix-only transform).** The row carries exactly one transform field:
+ * `matrix`, a row-major 4x4 world matrix of length exactly 16, produced on the owner by
+ * `mesh.computeWorldMatrix(true).asArray()`. Non-owners decompose it locally into
+ * `(scale, quaternion, position)`, discard the scale, and apply via
+ * `body.setTargetTransform(position, quaternion)`.
+ *
+ * **Invariant E (no Euler on item paths).** There is no `position`, `rotation`, or
+ * `velocity` field on this interface and none on the wire. The Euler channel of the mesh
+ * (`mesh.rotation.x/y/z`) is never sampled and never written on item paths.
+ *
+ * Under the three-tier authority model
+ * ([§4.7](../../../MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) +
+ * [§4.8](../../../MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle)):
  *
  * - For **dynamic items** (mass > 0, `collectible: false`), rows MUST be sent by the current
- *   `ownerClientId`. The server silently drops rows from non-owners per
- *   [§7.5](../../../MULTIPLAYER_SYNCH.md#75-item-authority-authorization); it does NOT 403.
- * - For **collectible items** (`collectible: true`), transform rows are bootstrap-only and MAY
- *   be emitted by the base synchronizer. Collection is driven by {@link ItemCollectionEvent}
+ *   resolved owner (explicit owner, else env-authority). The server silently drops rows from
+ *   non-owners per [§7.5](../../../MULTIPLAYER_SYNCH.md#75-item-authority-authorization).
+ * - For **collectible items** (`collectible: true`), transform rows are bootstrap-only and are
+ *   emitted by the env-authority. Collection is driven by {@link ItemCollectionEvent}
  *   first-write-wins.
  *
- * The optional `ownerClientId` field (added in this revision) carries the server's view of
- * authority at the moment of broadcast. Receivers MUST tolerate the field being absent
- * (legacy servers / senders).
+ * The optional `ownerClientId` field carries the server's view of authority at the moment of
+ * broadcast. Receivers MUST tolerate the field being absent (legacy servers / senders).
  */
 export interface ItemInstanceState {
   readonly instanceId: string;
   readonly itemName: string;
-  readonly position: Vector3Serializable;
-  readonly rotation: QuaternionSerializable;
-  readonly velocity: Vector3Serializable;
+  /** Row-major 4x4 world matrix; length exactly 16. Invariant M (no position/rotation/velocity). */
+  readonly matrix: readonly number[];
   readonly isCollected: boolean;
   readonly collectedByClientId?: string;
   /**
