@@ -2,13 +2,16 @@
 
 ## 30-Second Overview
 
-babylon-game-starter now supports **multiplayer**. Here's how it works:
+babylon-game-starter supports **multiplayer** with a **three-tier authority model**. Here's how it works:
 
-1. **First connected client** becomes the "synchronizer" (leader)
-2. **Synchronizer** detects entity changes (character movement, item pickup, effects, lights, sky)
-3. **Server broadcasts** updates to all clients every 50-100ms
-4. **All clients** apply received state to render shared world
-5. **On disconnect**: Next client automatically becomes synchronizer
+1. **Every client publishes its own character** (position, rotation, animation, boost).
+2. **Tier 1 — Base synchronizer** (one client, global): the first connected client publishes lights, sky effects, and environment particles.
+3. **Tier 2 — Environment item authority** (one client per environment): the **first person into an environment runs item physics by default** for that environment. Their client simulates gravity and contacts for every item in that env that nobody has explicitly claimed; everyone else runs those bodies as kinematic and receives target transforms over SSE. When the current env-authority leaves, authority is handed off in arrival order to the next remaining client in that env.
+4. **Tier 3 — Explicit item owner** (any client, per item): the client that walks up to a specific dynamic item can claim it with a proximity claim, overriding env-authority for that one row until release / disconnect / env switch.
+5. **Server broadcasts** updates to all clients every 50-100 ms, with a **server-side dirty filter** that drops unchanged item rows so bandwidth stays proportional to actual motion.
+6. **On disconnect**: the next client in join order becomes base synchronizer; the next remaining arrival in each env becomes that env's new env-authority; items the leaver explicitly owned fall back to env-authority.
+
+> **Authority model**: See [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) for explicit per-item authority and [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle) for the environment-scope default. Tunables: `claimRadiusMeters`, `claimGraceMs`, `claimIdleTimeoutMs`; per-field dirty-filter epsilons live in [§5.2](MULTIPLAYER_SYNCH.md#52-item-state).
 
 ---
 
@@ -226,21 +229,33 @@ mp.on('character-state-update', (update: CharacterStateUpdate) => {
 
 ### Receiving Item Updates
 
+See the Receiver cheat-sheet below for the four hard rules every conforming client MUST implement. The minimal shape:
+
 ```typescript
 mp.on('item-state-update', (update: ItemStateUpdate) => {
-  // Update item positions
-  for (const itemState of update.updates) {
-    if (!itemState.isCollected) {
-      updateItemPosition(itemState);
-    }
+  for (const ev of update.collections ?? []) {
+    handleRemoteItemCollection(ev);
   }
-  
-  // Handle collections
-  for (const collection of update.collections ?? []) {
-    handleRemoteItemCollection(collection);
+
+  for (const row of update.updates) {
+    if (authorityTracker.isOwnedBySelf(row.instanceId)) continue;
+    applyKinematicTarget(row);
   }
 });
 ```
+
+### Receiver cheat-sheet (mandatory four rules)
+
+| # | Rule | Why |
+|---|------|-----|
+| 1 | **Self-owner drop.** If `authorityTracker.isOwnedBySelf(row.instanceId)` returns true, skip the row. | Defense-in-depth for the server's owner-pin invariant. Under a conforming server you should never receive these, but reconnect races can deliver them. Applying them corrupts your own simulation ("cake hovering / oscillating"). |
+| 2 | **Non-owner kinematic apply.** For rows you do NOT own, keep the body in `PhysicsMotionType.ANIMATED` and apply the transform via `setTargetTransform` (or the project's equivalent). Never call `setLinearVelocity`, `applyImpulse`, or `addForce` on a non-owned body. | The resolved owner's physics engine is the only authoritative simulator for the item. Any force on a non-owner is a duplicate, divergent simulation. |
+| 3 | **Collection hide, always.** Process every `collections[]` entry by hiding / despawning the item locally, independent of `updates[]`. Idempotent: repeated collections on the same `instanceId` MUST NOT error. | Fixes "P2 does not see collectibles disappear." The server delivers collection events regardless of freshness state. |
+| 4 | **Unseeded-env hold.** Before entering an environment's first physics tick, hold every item in that env `ANIMATED` (kinematic) and WAIT for the bootstrap `item-state-update` to arrive and be applied. Only then resume the local physics loop and flip motion types per resolved owner. | Fixes "items whizzing in a blur on P2." Uninitialized dynamic bodies spawned before the snapshot spin off in random directions. |
+
+### Server-side freshness matrix (at a glance)
+
+The Go server maintains a per-client freshness matrix `freshness[env][instanceId][clientId] → fresh | stale` so that every client receives exactly the item-state rows they are missing — no more, no less. Under this design the **resolved owner of an item never receives rows for that item** (owner-pin invariant), which is the protocol-level fix for self-echo loops and the reason the cheat-sheet rule 1 is defense-in-depth rather than the primary guard. On environment entry, the matrix seeds all cells for the arriving client to `stale` so one natural broadcast window rehydrates the full env; on environment leave it evicts the column; on ownership change it re-pins the new owner's cell and marks the previous owner's cell stale. Full normative definition: [MULTIPLAYER_SYNCH.md §5.2.2](MULTIPLAYER_SYNCH.md#522-per-client-freshness-matrix).
 
 ### Tracking Synchronizer Changes
 
@@ -298,11 +313,38 @@ MULTIPLAYER_QUICK_START.md    # This file!
 
 ## Key Concepts
 
-### Synchronizer Role
-- **First connected client** automatically becomes synchronizer
-- **Responsibilities**: Detect changes, throttle updates, broadcast
-- **Authority**: Server validates all state updates come from synchronizer
-- **Elected**: On synchronizer disconnect, next client promoted automatically
+### Authority Model (three tiers)
+
+The three item-related tiers are independent of each other, independent of the base-synchronizer role, and are reported via three different SSE signals.
+
+| Tier | Scope | Signal | Spec |
+|------|-------|--------|------|
+| Base synchronizer | Global (one per server) | `synchronizer-changed` | [§4.6](MULTIPLAYER_SYNCH.md#46-base-synchronizer-changes) |
+| Environment item authority | Per environment (one per env) | `env-item-authority-changed` | [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle) |
+| Explicit item owner | Per `instanceId` | `item-authority-changed` | [§4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) |
+
+The **resolved owner** of any item row is: explicit owner if present, else env-authority of the item's environment, else none.
+
+### Base Synchronizer Role (Tier 1)
+- **First connected client** automatically becomes base synchronizer.
+- **Responsibilities**: Detect changes in lights / sky / env particles, throttle, broadcast.
+- **Scope**: Global world state only; base synchronizer has **no** special item write privilege.
+- **Authority**: Server enforces `X-Client-ID == baseSynchronizerId` for global-world-state routes ([§7.2](MULTIPLAYER_SYNCH.md#72-global-world-state-authorization)).
+- **Elected**: On base-synchronizer disconnect, next client promoted automatically via `synchronizer-changed`.
+
+### Environment Item Authority Role (Tier 2)
+- **First client into an environment** automatically becomes env-authority for that environment.
+- **Responsibilities**: Run dynamic physics locally for every item in that env (gravity, contacts, etc.) that nobody has explicitly claimed; sample and publish `ItemInstanceState` rows for those items.
+- **Handoff**: When the current env-authority leaves / disconnects / env-switches, the server promotes the next remaining arrival in arrival order and emits `env-item-authority-changed`.
+- **Re-entry**: Returning to an env you previously held authority over does NOT reclaim the role — you re-enter at the back of the arrival order.
+- **Why it exists**: without this tier, an item like a newly-spawned cake would free-fall with every client treating it as kinematic — it would never settle and peers would see it bouncing or teleporting. Tier 2 guarantees exactly one client is running real physics at all times.
+
+### Explicit Item Owner Role (Tier 3)
+- **Any client** can become the explicit owner of a specific dynamic item by entering its proximity bubble.
+- **Claim**: `PATCH /api/multiplayer/item-authority-claim` fires before collision so the body is already `DYNAMIC` at contact ([§5.6](MULTIPLAYER_SYNCH.md#56-item-authority-claim)).
+- **While owning**: the client overrides env-authority for that one `instanceId` and publishes rows for it. Other clients run the body as kinematic regardless of who holds env-authority for its env.
+- **Release**: after `claimGraceMs` of non-proximity-at-rest, on env switch, or on disconnect ([§5.7](MULTIPLAYER_SYNCH.md#57-item-authority-release)). After release, the item falls back to the env-authority default.
+- **Failover**: explicit item ownership does **not** follow the base-synchronizer role, does **not** follow env-authority changes, and is not transferred on disconnect — it simply lapses back to Tier 2.
 
 ### Throttling (Performance)
 - **Character**: 50ms (20 updates/sec max)
@@ -319,10 +361,12 @@ Only significant changes broadcast:
 - **Jump/Boost**: Toggle on/off
 
 ### Security
-- **Synchronizer-Only**: Non-sync clients can't broadcast state
-- **Timestamp Check**: Reject updates >30 seconds old
-- **Position Bounds**: Validate positions within ±10000 units
-- **Animation Validation**: Only accept known animation states
+- **Global world state is base-synchronizer-only** (lights / sky / env particles); other senders get `403 Forbidden`.
+- **Item state is row-filtered by resolved owner** — explicit `itemOwners` entry takes precedence; otherwise env-authority for the item's env; otherwise the row is dropped silently ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)).
+- **Dirty filter**: accepted rows are compared to a server-side `itemTransformCache`; unchanged repeats are dropped from the broadcast to save bandwidth. Late-joiners receive the cache on SSE open ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)).
+- **Timestamp Check**: Reject updates >30 seconds old.
+- **Position Bounds**: Validate positions within ±10000 units.
+- **Animation Validation**: Only accept known animation states.
 
 ---
 
@@ -407,6 +451,12 @@ if (distToClient > VISIBILITY_RANGE) {
   ignore update
 }
 ```
+
+### SSE compression (Brotli)
+
+The multiplayer SSE stream is Brotli-compressed by default. You do not need to do anything on the client side — `EventSource` and `fetch` streaming transparently decode `Content-Encoding: br`. Verify it's active in devtools: `GET /api/multiplayer/stream` should show `Content-Encoding: br` in the response headers. On item-heavy scenes the per-client fan-out compresses 70–85%; the compression middleware flushes on every event so frame-to-frame latency is unchanged.
+
+If a reverse proxy sits between the server and the browser, it MUST pass `Content-Encoding` through unchanged and MUST NOT buffer chunks. If events arrive in bursts rather than continuously, disable compression on the server with `MULTIPLAYER_SSE_COMPRESSION=off` (also accepts `gzip`) and investigate the proxy. See [MULTIPLAYER_SYNCH.md §9.1](MULTIPLAYER_SYNCH.md#91-sse-transport-compression-non-normative) for the full invariants.
 
 ---
 

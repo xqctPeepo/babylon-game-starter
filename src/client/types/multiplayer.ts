@@ -69,6 +69,22 @@ export interface CharacterState {
 // ITEM SYNCHRONIZATION
 // ============================================================================
 
+/**
+ * One row of item replication state. See {@link https://github.com | MULTIPLAYER_SYNCH.md §8.2}
+ * for the normative shape. Under the per-item authority model
+ * ([MULTIPLAYER_SYNCH.md §4.7](../../../MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle)):
+ *
+ * - For **dynamic items** (mass > 0, `collectible: false`), rows MUST be sent by the current
+ *   `ownerClientId`. The server silently drops rows from non-owners per
+ *   [§7.5](../../../MULTIPLAYER_SYNCH.md#75-item-authority-authorization); it does NOT 403.
+ * - For **collectible items** (`collectible: true`), transform rows are bootstrap-only and MAY
+ *   be emitted by the base synchronizer. Collection is driven by {@link ItemCollectionEvent}
+ *   first-write-wins.
+ *
+ * The optional `ownerClientId` field (added in this revision) carries the server's view of
+ * authority at the moment of broadcast. Receivers MUST tolerate the field being absent
+ * (legacy servers / senders).
+ */
 export interface ItemInstanceState {
   readonly instanceId: string;
   readonly itemName: string;
@@ -77,6 +93,11 @@ export interface ItemInstanceState {
   readonly velocity: Vector3Serializable;
   readonly isCollected: boolean;
   readonly collectedByClientId?: string;
+  /**
+   * Server's view of item authority at broadcast time (MULTIPLAYER_SYNCH.md §8.2).
+   * Absent/null when the item is unowned or when the server has not been upgraded.
+   */
+  readonly ownerClientId?: string | null;
   readonly timestamp: number;
 }
 
@@ -161,7 +182,16 @@ export interface CharacterStateUpdate {
 }
 
 /**
- * Bulk item updates from synchronizer
+ * Bulk item updates broadcast via `item-state-update`
+ * ([MULTIPLAYER_SYNCH.md §6.2](../../../MULTIPLAYER_SYNCH.md#62-item-state-update)).
+ *
+ * Under the hybrid authority model this is NOT "synchronizer-only". Rows may originate from
+ * multiple clients on the same tick — one row per dynamic `instanceId` from the current owner,
+ * plus bootstrap rows for collectibles from the base synchronizer. The server applies the
+ * per-row filter defined in
+ * [§7.5](../../../MULTIPLAYER_SYNCH.md#75-item-authority-authorization) before broadcasting.
+ * `collections` is first-write-wins: any client may submit, the server keeps the first per
+ * `instanceId`.
  */
 export interface ItemStateUpdate {
   readonly updates: readonly ItemInstanceState[];
@@ -230,6 +260,52 @@ export interface ServerErrorMessage {
 // ============================================================================
 // CLIENT REQUEST TYPES
 // ============================================================================
+
+// ============================================================================
+// ITEM AUTHORITY MESSAGES (MULTIPLAYER_SYNCH.md §8.6)
+// ============================================================================
+
+/** Request body for `PATCH /api/multiplayer/item-authority-claim` (§5.6). */
+export interface ItemAuthorityClaim {
+  readonly instanceId: string;
+  readonly clientPosition?: { readonly x: number; readonly y: number; readonly z: number };
+  readonly reason?: string;
+  readonly timestamp: number;
+}
+
+/** Response body for the claim endpoint. */
+export interface ItemAuthorityClaimResponse {
+  readonly ok: true;
+  readonly accepted: boolean;
+  readonly instanceId: string;
+  readonly ownerClientId: string | null;
+  readonly currentOwnerId?: string;
+  readonly serverTimestamp: number;
+}
+
+/** Request body for `PATCH /api/multiplayer/item-authority-release` (§5.7). */
+export interface ItemAuthorityRelease {
+  readonly instanceId: string;
+  readonly reason?: string;
+  readonly timestamp: number;
+}
+
+/** Response body for the release endpoint. */
+export interface ItemAuthorityReleaseResponse {
+  readonly ok: true;
+  readonly released: boolean;
+  readonly instanceId: string;
+  readonly serverTimestamp: number;
+}
+
+/** SSE signal payload for `item-authority-changed` (§6.8). */
+export interface ItemAuthorityChangedMessage {
+  readonly instanceId: string;
+  readonly previousOwnerId: string | null;
+  readonly newOwnerId: string | null;
+  readonly reason: 'claim' | 'release' | 'disconnect' | 'idle_timeout' | 'env_switch';
+  readonly timestamp: number;
+}
 
 /**
  * Client environment switch notification

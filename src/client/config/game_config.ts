@@ -309,6 +309,17 @@ export const CONFIG: GameConfig = {
     PRODUCTION_SERVER: 'bgs-mp.onrender.com',
     LOCAL_SERVER: 'localhost:5000',
     CONNECTION_TIMEOUT_MS: 15000,
-    PRODUCTION_FIRST: true
+    PRODUCTION_FIRST: true,
+    /**
+     * Per-item authority tunables (MULTIPLAYER_SYNCH.md §4.7).
+     * - CLAIM_RADIUS_METERS: radius around a dynamic item that triggers a proximity claim.
+     * - CLAIM_GRACE_MS: after leaving the bubble, keep ownership for this long so a quick
+     *   re-entry doesn't thrash claim/release.
+     * - CLAIM_IDLE_TIMEOUT_MS: if an owner stops publishing rows for this long, another
+     *   client's claim is accepted server-side.
+     */
+    CLAIM_RADIUS_METERS: 2.5,
+    CLAIM_GRACE_MS: 1200,
+    CLAIM_IDLE_TIMEOUT_MS: 1500
   }
 } as const;

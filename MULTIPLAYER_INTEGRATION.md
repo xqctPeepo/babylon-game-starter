@@ -13,10 +13,356 @@ This guide walks through the multiplayer architecture implementation for babylon
 - **Serialization Utils**: Convert Babylon.js types to JSON-friendly formats
 
 ### Server-Side (Go + Datastar SDK)
-- **HTTP Handlers**: Join/leave endpoints, health check
-- **State Update Handlers**: Receive and broadcast state updates
-- **Client Registry**: Ordered map for synchronizer role management
+- **HTTP Handlers**: Join/leave endpoints, health check, authority claim/release
+- **State Update Handlers**: Receive, row-filter, dirty-filter, and broadcast state updates
+- **Client Registry**: Ordered map for base-synchronizer role management
+- **Explicit Item Authority Registry**: `itemOwners` map driving per-item authorization ([§4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle))
+- **Environment Authority Registry**: `envAuthority` + `envArrivalOrder` maps driving per-environment default item authorization ([§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle))
+- **Item Transform Cache**: `itemTransformCache` of last-accepted field values per `instanceId`, backing the dirty filter ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state))
 - **SSE + patch-signals**: Long-lived `EventSource` stream; server pushes `datastar-patch-signals` events (Datastar Go SDK `MarshalAndPatchSignals`)
+- **SSE transport compression**: Brotli by default on the multiplayer SSE route via [`github.com/CAFxX/httpcompression`](https://github.com/CAFxX/httpcompression); env-var override `MULTIPLAYER_SSE_COMPRESSION=brotli|gzip|off` ([MULTIPLAYER_SYNCH.md §9.1](MULTIPLAYER_SYNCH.md#91-sse-transport-compression-non-normative))
+
+#### SSE compression (pseudo-code)
+
+Compression is applied via a single middleware in the server's request pipeline, between CORS and the route mux. The factory lives in its own file so the Brotli tuning and the Content-Type allow-list stay in one place; nothing in `handlers.go` changes.
+
+```go
+// src/server/multiplayer/compression.go
+
+import (
+  "net/http"
+  "os"
+  "strings"
+
+  httpcompression "github.com/CAFxX/httpcompression"
+  brotlienc        "github.com/CAFxX/httpcompression/contrib/andybalholm/brotli"
+  gzipenc          "github.com/CAFxX/httpcompression/contrib/klauspost/gzip"
+)
+
+// mode() reads MULTIPLAYER_SSE_COMPRESSION (default "brotli"; accepts "gzip" or "off").
+func compressionMode() string {
+  switch strings.ToLower(strings.TrimSpace(os.Getenv("MULTIPLAYER_SSE_COMPRESSION"))) {
+  case "off", "none", "disabled":
+    return "off"
+  case "gzip":
+    return "gzip"
+  default:
+    return "brotli"
+  }
+}
+
+// buildCompressionMiddleware returns a pass-through when mode == "off".
+func buildCompressionMiddleware() func(http.Handler) http.Handler {
+  mode := compressionMode()
+  if mode == "off" {
+    return func(next http.Handler) http.Handler { return next }
+  }
+
+  // Brotli: streaming mode, small window, low-latency quality.
+  // Quality 11 (default) buffers too aggressively for per-event SSE flushes.
+  brEnc, _ := brotlienc.New(brotlienc.Options{Quality: 4, LGWin: 18})
+  gzEnc, _ := gzipenc.New(gzipenc.Options{Level: 4})
+
+  opts := []httpcompression.Option{
+    httpcompression.ContentTypes([]string{"text/event-stream", "application/json"}, false),
+    httpcompression.MinSize(256), // don't compress tiny PATCH 200s
+  }
+  if mode == "brotli" {
+    opts = append(opts, httpcompression.Compressor(brotlienc.Encoding, 1, brEnc))
+    opts = append(opts, httpcompression.Compressor(gzipenc.Encoding, 2, gzEnc))
+  } else {
+    opts = append(opts, httpcompression.Compressor(gzipenc.Encoding, 1, gzEnc))
+  }
+
+  adapter, err := httpcompression.Adapter(opts...)
+  if err != nil {
+    return func(next http.Handler) http.Handler { return next } // fail-open
+  }
+  return adapter
+}
+```
+
+Wiring in [`src/server/multiplayer/main.go`](src/server/multiplayer/main.go):
+
+```go
+compress := buildCompressionMiddleware()
+handler := withCORS(compress(mux))
+```
+
+Key correctness constraints (enforced by library; cited here for reviewers):
+
+- The wrapped response writer **must** preserve `http.Flusher`. `CAFxX/httpcompression` does — its wrapper forwards `Flush()` through and emits a Brotli "flush block" to the wire on every flush. Hand-rolling a compression wrapper without flush support would silently break SSE, buffering until the connection closes.
+- **Never set `Content-Length`** on SSE. The middleware honors chunked transfer automatically.
+- PATCH responses are tiny `200 OK` ACKs; the `MinSize(256)` filter keeps them uncompressed.
+
+#### Dev-proxy interaction
+
+[vite.config.ts](vite.config.ts) configures the multiplayer route through Vite's built-in proxy. Vite's proxy does **not** decode `Content-Encoding` by default — `br` passes through untouched to the browser, and the browser's `EventSource` decodes it natively. No changes to the Vite config are required.
+
+If a custom proxy (nginx, Traefik, a CDN, etc.) sits between the multiplayer backend and the browser, verify:
+
+1. The proxy forwards `Content-Encoding` unchanged on the `/api/multiplayer/stream` route.
+2. The proxy does not buffer chunks for compression (e.g., nginx's `proxy_buffering off;` on that location).
+3. The proxy does not attempt to re-compress an already-compressed response.
+
+When in doubt, set `MULTIPLAYER_SSE_COMPRESSION=off` on the server side and let the proxy handle compression itself.
+
+#### Environment Authority Registry (pseudo-code)
+
+```go
+// MultiplayerServer fields
+envAuthority    map[string]string   // envName → clientID (head of arrival order)
+envArrivalOrder map[string][]string // envName → FIFO of clientIDs currently in that env
+
+// On join (and on server-observed env switch IN)
+func (ms *MultiplayerServer) noteEnvEnter(clientID, envName string) {
+  order := ms.envArrivalOrder[envName]
+  for _, id := range order { if id == clientID { return } } // idempotent
+  ms.envArrivalOrder[envName] = append(order, clientID)
+  if ms.envAuthority[envName] == "" {
+    ms.envAuthority[envName] = clientID
+    ms.broadcastEnvItemAuthorityChanged(envName, "", clientID, "arrival")
+  }
+  // else: sender is a waiter; no signal
+}
+
+// On leave / disconnect / server-observed env switch OUT
+func (ms *MultiplayerServer) noteEnvLeave(clientID, envName, reason string) {
+  order := ms.envArrivalOrder[envName]
+  next := order[:0]
+  for _, id := range order { if id != clientID { next = append(next, id) } }
+  ms.envArrivalOrder[envName] = next
+
+  if ms.envAuthority[envName] != clientID { return }
+  prev := clientID
+  if len(next) == 0 {
+    delete(ms.envAuthority, envName)
+    ms.broadcastEnvItemAuthorityChanged(envName, prev, "", reason)
+  } else {
+    newAuth := next[0] // ordered failover: next-earliest remaining arrival
+    ms.envAuthority[envName] = newAuth
+    ms.broadcastEnvItemAuthorityChanged(envName, prev, newAuth, reason)
+  }
+}
+```
+
+Re-entry is a normal arrival: returning to an env you previously held authority over appends you to the back of `envArrivalOrder[envName]` and does NOT reclaim the role unless you are again the only client present.
+
+#### Item Transform Dirty Filter (pseudo-code)
+
+```go
+type cachedItemTransform struct {
+  position, rotation, velocity [3]float64
+  isCollected                   bool
+  collectedByClientID           string
+  ownerClientID                 string
+  lastBroadcastAt               int64
+}
+// map[instanceId] cachedItemTransform lives on the MultiplayerServer.
+
+const (
+  positionEpsilon = 1e-3
+  rotationEpsilon = 1e-3
+  velocityEpsilon = 1e-3
+)
+
+func vecDirty(a, b [3]float64, eps float64) bool {
+  for i := 0; i < 3; i++ { if math.Abs(a[i]-b[i]) > eps { return true } }
+  return false
+}
+
+func (ms *MultiplayerServer) applyDirtyFilter(rows []ItemInstanceState) []ItemInstanceState {
+  out := rows[:0]
+  for _, r := range rows {
+    cached, ok := ms.itemTransformCache[r.InstanceID]
+    dirty := !ok ||
+      vecDirty(cached.position, r.Position, positionEpsilon) ||
+      vecDirty(cached.rotation, r.Rotation, rotationEpsilon) ||
+      vecDirty(cached.velocity, r.Velocity, velocityEpsilon) ||
+      cached.isCollected != r.IsCollected ||
+      cached.collectedByClientID != r.CollectedByClientID ||
+      cached.ownerClientID != r.OwnerClientID
+    // Always refresh activity tracking on explicit-owned items
+    if owner, has := ms.itemOwners[r.InstanceID]; has && owner.OwnerClientID == r.SenderID {
+      owner.LastUpdatedAt = ms.now()
+    }
+    if dirty {
+      ms.itemTransformCache[r.InstanceID] = cached.updateFrom(r, ms.now())
+      out = append(out, r)
+    }
+  }
+  return out
+}
+```
+
+Late-joiners are not starved by the dirty filter: when a client enters an environment, the per-client freshness matrix (below) seeds every cell for that client to `stale`, so the next broadcast window emits the full cached env as a per-recipient `item-state-update` bootstrap.
+
+#### Per-client freshness matrix (pseudo-code)
+
+```go
+// MultiplayerServer fields
+//   freshness[envName][instanceId][clientId] = fresh | stale
+freshness map[string]map[string]map[string]bool // true == fresh, false == stale
+
+// Owner pin: called whenever the resolved owner of I changes OR a DIRTY row is accepted.
+func (ms *MultiplayerServer) pinOwner(env, instanceId, owner string) {
+  if ms.freshness[env] == nil || ms.freshness[env][instanceId] == nil { return }
+  ms.freshness[env][instanceId][owner] = true // owner is always FRESH
+}
+
+// Called once per accepted DIRTY ItemInstanceState row.
+func (ms *MultiplayerServer) projectDirtyRow(env, instanceId, owner string) {
+  cells := ms.freshness[env][instanceId]
+  if cells == nil { return }
+  for clientId := range cells {
+    if clientId == owner { cells[clientId] = true } else { cells[clientId] = false }
+  }
+}
+
+// AOI enter: initial join / env-switch in / SSE reconnect for this env.
+func (ms *MultiplayerServer) onEnvEnter(env, clientId string) {
+  if ms.freshness[env] == nil { ms.freshness[env] = map[string]map[string]bool{} }
+  for instanceId := range ms.itemsInEnv(env) {
+    row, ok := ms.freshness[env][instanceId]
+    if !ok { row = map[string]bool{}; ms.freshness[env][instanceId] = row }
+    row[clientId] = false // stale — triggers a bootstrap row in the next window
+  }
+  // Owner-pin re-seat for any items where this arrival is already the resolved owner
+  for instanceId, owner := range ms.resolvedOwnersInEnv(env) {
+    if owner == clientId { ms.freshness[env][instanceId][clientId] = true }
+  }
+}
+
+// AOI leave: explicit leave, disconnect, env-switch out.
+func (ms *MultiplayerServer) onEnvLeave(env, clientId string) {
+  for instanceId := range ms.freshness[env] {
+    delete(ms.freshness[env][instanceId], clientId)
+  }
+}
+
+// Ownership transition: item-authority-changed or env-item-authority-changed for I in E.
+func (ms *MultiplayerServer) onOwnerChange(env, instanceId, prevOwner, newOwner string) {
+  cells := ms.freshness[env][instanceId]
+  if cells == nil { return }
+  cells[newOwner] = true   // re-pin
+  if prevOwner != "" { cells[prevOwner] = false } // previous owner is now a subscriber
+  // other cells keep their value; next DIRTY row from newOwner re-projects via projectDirtyRow
+}
+
+// Per-recipient fan-out: build one item-state-update per client with stale cells or pending collections.
+func (ms *MultiplayerServer) buildFanoutForClient(env, clientId string) *ItemStateUpdate {
+  var updates []ItemInstanceState
+  for instanceId, cells := range ms.freshness[env] {
+    if !cells[clientId] { // stale
+      updates = append(updates, ms.itemTransformCache[instanceId].toRow())
+      cells[clientId] = true // flip to fresh after enqueue
+    }
+  }
+  collections := ms.drainPendingCollectionsFor(env, clientId)
+  if len(updates) == 0 && len(collections) == 0 { return nil }
+  return &ItemStateUpdate{Updates: updates, Collections: collections, Timestamp: ms.now()}
+}
+
+// Always-deliver collections: projected independently of updates.
+func (ms *MultiplayerServer) onCollectionAccepted(env, instanceId, senderId string, ev ItemCollectionEvent) {
+  for clientId := range ms.clientsInEnv(env) {
+    if clientId != senderId { ms.enqueuePendingCollection(env, clientId, ev) }
+  }
+  // Mark the next ItemInstanceState row for instanceId as unconditionally DIRTY so
+  // the coupled transform echoes to peers; collection delivery MUST NOT be gated on it.
+  ms.markTerminalNextRow(instanceId)
+}
+```
+
+#### Orphan reassignment on leave (pseudo-code)
+
+Executed atomically in the server tick that observes departure; combines explicit-claim release, AOI eviction, env-authority failover, and freshness re-pin.
+
+```go
+func (ms *MultiplayerServer) handleClientLeaveEnv(clientId, env, reason string) {
+  // 1. Release every explicit claim held by clientId in this env.
+  for instanceId, owner := range ms.itemOwners {
+    if owner.OwnerClientID != clientId { continue }
+    if ms.envOfInstance(instanceId) != env { continue }
+    delete(ms.itemOwners, instanceId)
+    ms.broadcastItemAuthorityChanged(instanceId, clientId, "", reason) // resolves to env-authority
+  }
+
+  // 2. Evict AOI column for the leaver.
+  ms.onEnvLeave(env, clientId)
+
+  // 3. Env-authority failover if the leaver held the role.
+  ms.noteEnvLeave(clientId, env, reason) // existing helper: pops arrivalOrder, emits env-item-authority-changed
+
+  // 4. After the env-authority swap, re-pin freshness + flush.
+  newAuth := ms.envAuthority[env] // "" if nobody left
+  for instanceId := range ms.itemsInEnv(env) {
+    // Only items whose resolved owner actually changed need re-pinning.
+    if ms.resolvedOwner(instanceId) != newAuth && newAuth != "" { continue }
+    ms.onOwnerChange(env, instanceId, clientId, newAuth)
+    ms.markTerminalNextRow(instanceId) // force next row from newAuth to be DIRTY
+  }
+}
+
+// On hard disconnect, call handleClientLeaveEnv for every env the client was resident in.
+func (ms *MultiplayerServer) handleDisconnect(clientId string) {
+  for _, env := range ms.envsForClient(clientId) {
+    ms.handleClientLeaveEnv(clientId, env, "disconnect")
+  }
+  ms.removeClientState(clientId)
+}
+```
+
+`markTerminalNextRow` is the same mechanism §5.2.1 rule 5 uses for `isCollected` transitions — it guarantees the very next row the server accepts for that `instanceId` is projected DIRTY to every in-env non-owner, even if the geometric delta is below epsilon.
+
+#### Client-side applyItemSnapshot (pseudo-code)
+
+```ts
+// Called for every item-state-update received from the server.
+function applyItemSnapshot(update: ItemStateUpdate): void {
+  // 1. Collections first — INDEPENDENT of updates[]. Idempotent.
+  for (const ev of update.collections ?? []) {
+    collectiblesManager.hideCollectedItem(ev.instanceId);
+  }
+
+  // 2. Updates — drop self-owned rows (defense-in-depth); non-owned rows via kinematic target.
+  for (const row of update.updates ?? []) {
+    if (authorityTracker.isOwnedBySelf(row.instanceId)) {
+      continue; // server should never send this under owner-pin; drop if it does
+    }
+    const body = collectiblesManager.getPhysicsBody(row.instanceId);
+    if (!body) continue;
+    CollectiblesManager.setItemKinematic(row.instanceId, true);
+    body.setTargetTransform(toVec3(row.position), toQuat(row.rotation));
+    // DO NOT setLinearVelocity / applyImpulse / addForce on non-owned bodies.
+  }
+}
+
+function onEnvironmentLoaded(envName: string): void {
+  // 1. Hold all env items kinematic until the bootstrap snapshot is applied.
+  for (const item of itemsInEnv(envName)) {
+    CollectiblesManager.setItemKinematic(item.instanceId, true);
+  }
+  // 2. Do NOT start the local physics loop for this env yet.
+  envPhysicsLoop.pauseFor(envName);
+  // 3. Wait for the first item-state-update addressed to this client for envName
+  //    (driven by freshness-matrix AOI-enter on the server side).
+  mp.once("item-state-update", (update) => {
+    applyItemSnapshot(update);
+    // 4. NOW apply the authoritative motion-type per resolved owner (DYNAMIC vs ANIMATED)
+    //    and resume physics.
+    seedMotionTypesForEnv(envName);
+    envPhysicsLoop.resumeFor(envName);
+  });
+}
+
+function applyCollections(events: ItemCollectionEvent[]): void {
+  // Standalone; used when a caller has already de-coupled collections[] from updates[].
+  for (const ev of events) collectiblesManager.hideCollectedItem(ev.instanceId);
+}
+```
+
+The three pseudocode blocks above (AOI lifecycle, orphan reassignment, `applyItemSnapshot`) together implement the server-side freshness matrix and the client-side receiver contract that MULTIPLAYER_SYNCH.md §5.2.2 and §6.2 require.
 
 ---
 
@@ -205,11 +551,19 @@ private updateCharacterState(): void {
 
 #### Item Sync Integration
 
+Items use a **three-tier authority model** — see [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) and [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle). Collection events are first-write-wins, so any client may emit them. Transform / velocity rows must come from the item's **resolved owner**:
+
+1. The **explicit item owner** (an active `itemOwners` entry from proximity claims), if any.
+2. Otherwise, the **environment item authority** for the item's environment — the first-in-env client, with ordered failover.
+3. Otherwise, no row is accepted (server silently drops).
+
+The client-side `ItemAuthorityTracker` resolves this for you: `tracker.isResolvedOwnerSelf(instanceId, envName)` returns `true` whenever self is either the explicit owner or the env-authority for `envName` and no other client explicitly claimed `instanceId`.
+
 ```typescript
-// In CollectiblesManager when item collected
+// In CollectiblesManager when item collected (first-write-wins)
 public async collectItem(item: ItemInstance): Promise<void> {
   // ... existing logic
-  
+
   const itemSync = this.getItemSync();
   itemSync.recordCollection({
     instanceId: item.id,
@@ -218,13 +572,30 @@ public async collectItem(item: ItemInstance): Promise<void> {
     creditsEarned: item.creditValue,
     timestamp: Date.now()
   });
-  
-  if (mp.isSynchronizer()) {
-    const update = itemSync.createStateUpdate(Date.now());
-    if (update) mp.updateItemState(update);
-  }
+
+  // Any client may emit collection events; the server keeps the first per instanceId.
+  const update = itemSync.createStateUpdate(Date.now());
+  if (update) mp.updateItemState(update);
+}
+
+// In the item-authority loop: resolved owner publishes transforms.
+private publishOwnedItemStates(): void {
+  const tracker = this.getItemAuthorityTracker();
+  const envName = this.getCurrentEnvironmentName();
+
+  // Every instanceId for which self is the resolved owner:
+  //   - explicit-owned (proximity claim), OR
+  //   - unclaimed and self is env-authority for envName.
+  const resolvedIds = tracker.getResolvedOwnedInstanceIds(envName);
+  if (resolvedIds.size === 0) return;
+
+  const itemSync = this.getItemSync();
+  const update = itemSync.createStateUpdate(Date.now(), resolvedIds);
+  if (update) mp.updateItemState(update);
 }
 ```
+
+Per-row authorization is enforced by the server ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)) — unauthorized rows are silently dropped rather than failing the whole PATCH. The server additionally applies a **dirty filter** to the surviving rows ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): rows whose position/rotation/velocity and categorical fields are within epsilon of the cached value are dropped from the broadcast. Clients SHOULD still filter locally (send at most ~10 Hz, skip rows that haven't changed beyond a local threshold) to avoid wasted upstream bandwidth; the server-side filter is a safety net, not a substitute.
 
 #### Effects Sync Integration
 
@@ -330,18 +701,73 @@ mp.on('character-state-update', (update: CharacterStateUpdate) => {
 
 ---
 
-## Synchronizer Role
+## Roles
 
-### Responsibilities
-1. **Detects changes**: Samples entity state each frame
-2. **Throttles updates**: Only sends on significant changes (~20-50Hz)
-3. **Broadcasts**: Sends PATCH to server with bulk updates
-4. **Authoritative**: Server validates updates come from synchronizer only
+Each client holds up to **three independent role buckets** at any moment (see [MULTIPLAYER_SYNCH.md §2](MULTIPLAYER_SYNCH.md#2-terms)). All three are optional and non-exclusive — one client may hold all of them, or none.
 
-### Role Assignment
-- **First connected client** becomes synchronizer
-- **On disconnect**: Next client in order becomes synchronizer
-- **Server broadcasts**: `synchronizer-changed` signal to all clients
+### Base Synchronizer Role
+
+Exactly one client at a time, global scope. Owns global world state: **lights, sky effects, environment particles**. Does **not** own items.
+
+**Responsibilities**
+
+1. Sample lights / sky / env-particle state each frame.
+2. Throttle updates (~10 Hz each — see tunables below).
+3. PATCH global-world-state endpoints; the server `403`s non-synchronizer senders.
+
+**Assignment**
+
+- First connected client becomes base synchronizer.
+- On disconnect, the next client in join order is promoted.
+- Server emits `synchronizer-changed` ([§6.6](MULTIPLAYER_SYNCH.md#66-synchronizer-changed)). Item authority is **not** transferred by this signal.
+
+`mp.isSynchronizer()` returns `true` when this client currently holds the base-synchronizer role. This flag is **irrelevant for item-state decisions**.
+
+### Environment Item Authority Role
+
+At most one client per environment. Owns, by default, the `ItemInstanceState` stream for **every item in that environment that isn't explicitly claimed**. This is the tier that keeps gravity running on a just-loaded env before anyone has reached a claim bubble.
+
+**Responsibilities**
+
+1. On entry to (or arrival in) an environment `E`, listen for `env-item-authority-changed` with `environmentName: E` and `newAuthorityId: self`.
+2. When authority is self: for every item in `E` whose `instanceId` is not in the explicit `itemOwners` map, flip the local physics body to `DYNAMIC` and begin sampling rows.
+3. PATCH `/api/multiplayer/item-state` with those rows. The server runs the three-tier resolved-owner filter followed by the dirty filter, broadcasting only changed rows.
+4. On `env-item-authority-changed` with `newAuthorityId ≠ self` (or `null`): stop sampling for the items you held by default; flip their bodies back to `ANIMATED` (kinematic) unless they are explicitly claimed by self.
+5. Publish bootstrap positions for collectible items in `E` that are not yet collected (responsibility moves with env-authority; collection events themselves remain first-write-wins).
+
+**Assignment (§4.8)**
+
+- First client to enter an environment becomes env-authority for that env.
+- Subsequent arrivals append to `envArrivalOrder[E]` but do NOT displace the current authority.
+- When the current authority leaves / disconnects / env-switches, the server promotes the new head of `envArrivalOrder[E]` — the next-earliest remaining arrival — and emits `env-item-authority-changed` with `reason` set to `"failover"`, `"disconnect"`, or `"env_switch"` respectively.
+- Returning to an environment you previously held authority over does NOT reclaim the role; you re-enter at the back of the arrival order.
+
+`mp.isEnvAuthority(envName)` / `tracker.isEnvAuthoritySelf(envName)` should be your test.
+
+### Explicit Item Owner Role
+
+Held per `instanceId` and independently per client. Overrides env-authority for that single row. Used when a client walks up to a specific dynamic item and needs deterministic local ownership of its simulation.
+
+Scope:
+- `environment.items` (both `collectible: false` and, for pre-collection transform, `collectible: true`).
+- `environment.physicsObjects` with `mass > 0`.
+
+**Responsibilities**
+
+1. Monitor proximity between the local character and nearby dynamic items.
+2. PATCH `/api/multiplayer/item-authority-claim` on proximity enter; server responds with accept/reject.
+3. On accept: flip the local physics body for that `instanceId` to `DYNAMIC`, begin publishing `ItemInstanceState` rows for it (as a superset of whatever you publish under env-authority).
+4. On `item-authority-changed` with `newOwnerId ≠ self`: flip the body to `ANIMATED` (kinematic) — unless you are still the env-authority AND no other client holds an explicit claim, in which case the resolved owner remains self and the body stays `DYNAMIC`.
+5. PATCH `/api/multiplayer/item-authority-release` after `claimGraceMs` of continuous non-proximity with body at rest, or on env switch. After release, the item falls back to env-authority for continued simulation.
+
+**Assignment**
+
+Last-claim-wins with the guardrails in [§4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle):
+- An existing owner is displaceable only when idle (`claimIdleTimeoutMs`), explicitly released, or disconnected.
+- Disconnects release every owned `instanceId` (`reason: "disconnect"`).
+- Environment switches release via `reason: "env_switch"`.
+
+Use the `ItemAuthorityTracker` resolver — or the per-row `ownerClientId` in incoming `item-state-update` payloads — to check ownership; do **not** use `mp.isSynchronizer()` for item decisions.
 
 ### State Update Throttling
 
@@ -417,11 +843,13 @@ new SkySync(100);
 
 ## Security Considerations
 
-1. **Synchronizer-Only Updates**: Server rejects updates from non-synchronizer clients
-2. **Timestamp Validation**: Rejects updates older than 30 seconds
-3. **Position Bounds**: Validates positions within ±10000 units
-4. **Animation State**: Only accepts valid animation states
-5. **Session Tokens**: SSE requires valid session ID
+1. **Base-synchronizer-only global world state**: lights / sky / env particles require `X-Client-ID == baseSynchronizerId`; other senders get `403 Forbidden` ([§7.2](MULTIPLAYER_SYNCH.md#72-global-world-state-authorization)).
+2. **Three-tier item authorization**: item-state rows are filtered per `instanceId` by resolved owner — explicit `itemOwners` entry first, else `envAuthority` for the item's environment, else drop ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)). Rows that fail the filter are dropped silently rather than failing the whole request. Base-synchronizer role alone confers **no** item write privilege.
+3. **Server-side dirty filter**: surviving rows are compared field-by-field (with per-component epsilons) to the server's `itemTransformCache`; unchanged repeats are silently dropped from the broadcast without affecting activity tracking ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)).
+4. **Timestamp Validation**: Rejects updates older than 30 seconds.
+5. **Position Bounds**: Validates positions within ±10000 units.
+6. **Animation State**: Only accepts valid animation states.
+7. **Session Tokens**: SSE requires valid session ID.
 
 ---
 
@@ -439,8 +867,31 @@ new SkySync(100);
 - Rotation: 0.05 radians (~2.9°)
 - Animation Frame: 0.01 (1% change)
 
+### Server-Side Dirty Filter (Item Transforms)
+
+The server runs a second-stage filter after authority row filtering ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): accepted `ItemInstanceState` rows are compared against the last-broadcast cached values for the same `instanceId`. Rows whose `position`, `rotation`, `velocity` components all fall within the per-component epsilons AND whose categorical fields (`isCollected`, `collectedByClientId`, `ownerClientId`) are exactly equal are considered CLEAN and dropped from the outgoing broadcast.
+
+Defaults:
+- `positionEpsilon = 1e-3` meters
+- `rotationEpsilon = 1e-3` radians
+- `velocityEpsilon = 1e-3` meters/second
+
+Activity bookkeeping (`itemOwners.lastUpdatedAt`) is refreshed for CLEAN rows too — only the broadcast is suppressed. Late joiners are seeded by the **per-client freshness matrix AOI-enter** hook ([§5.2.2](MULTIPLAYER_SYNCH.md#522-per-client-freshness-matrix) rule 4): every item cell for the arriving client is initialized to `stale`, so the next broadcast window emits a per-recipient `item-state-update` containing the full `itemTransformCache` for the arrived env plus any undelivered collection events. There is no separate SSE-open replay code path.
+
+### Per-Client Freshness Projection (Fan-out)
+
+After the dirty filter, accepted DIRTY rows are projected through the freshness matrix ([§5.2.2](MULTIPLAYER_SYNCH.md#522-per-client-freshness-matrix)): each (environment, item, client) cell is marked `stale` if the client is not the resolved owner, and the fan-out producer emits one `item-state-update` per client with stale cells. Consequences:
+
+- **Owners receive zero rows for their own items** (owner-pin invariant). Self-echo is eliminated at the protocol level rather than on the client.
+- **Clients not in env `E` receive zero rows for items in `E`.** There are no cells for them in `freshness[E]`.
+- **Bandwidth scales with `|stale_cells|` per window, not `|clients| × |dirty_rows|`.** Every row goes only to recipients that need it.
+
 ### Bulk Updates
-All state updates batched into single SIGNAL message per type, reducing network overhead.
+All state updates batched into single SIGNAL message per type, reducing network overhead. When both `updates` and `collections` are empty after dirty-filtering, the server elides the broadcast entirely.
+
+### SSE transport compression
+
+Brotli is enabled on the SSE route by default (see *SSE compression (pseudo-code)* above and [MULTIPLAYER_SYNCH.md §9.1](MULTIPLAYER_SYNCH.md#91-sse-transport-compression-non-normative)). On typical item-heavy workloads the per-client fan-out produces small, repetitive JSON payloads that compress 70–85% at Brotli quality 4 without measurably affecting frame-to-frame latency — the compression middleware emits a flush block on every `MarshalAndPatchSignals`, preserving the same event cadence as the uncompressed path. Set `MULTIPLAYER_SSE_COMPRESSION=off` at the server to disable it when debugging proxy interactions or measuring uncompressed baselines.
 
 ---
 
@@ -465,7 +916,29 @@ Open both clients in separate browser tabs and verify:
 - [ ] First client shows "(Sync)", second shows "(Client)"
 - [ ] Character movement from sync client appears on other clients
 - [ ] Items collected sync to other clients
-- [ ] Disconnect first client → second client becomes synchronizer
+- [ ] Disconnect first client → second client becomes base synchronizer
+- [ ] Claim an item on one client (walk up to it) → other clients receive `item-authority-changed`
+- [ ] Non-owner client sees the item as kinematic (no local simulation); owner sees dynamic
+- [ ] Owner disconnects mid-interaction → item transitions to `Unowned`; another client can claim
+
+Environment item authority scenarios:
+- [ ] First client into an env simulates gravity for all its dynamic items: spawn an env whose items free-fall (e.g. RV Life cake). P1 entering alone sees the cake settle onto the floor locally and P2 (joining later) also sees it settled — not bouncing or invisible.
+- [ ] Env-authority leaves before any proximity claim; remaining client takes over simulation: P1 and P2 both in env, neither claims any item. P1 env-switches out. Server emits `env-item-authority-changed` with `reason: "env_switch"`, `newAuthorityId: P2`. P2 takes over simulation; items continue to behave consistently.
+- [ ] Proximity claim during env-authority's tenure survives env-authority's departure: P1 is env-authority, P2 walks up to item I and claims it explicitly. P1 leaves env. P2 retains explicit ownership of I regardless of env-authority handoff.
+- [ ] Env-authority handoff on disconnect (not just env switch): same as above, but P1 closes the tab rather than env-switching.
+- [ ] Re-entry does not reclaim: P1 (env-authority for rv-life) env-switches out; P2 becomes env-authority. P1 returns to rv-life. P2 keeps env-authority; P1 is a waiter.
+
+Bandwidth / dirty-filter scenarios:
+- [ ] A stationary item held at rest by env-authority produces no `item-state-update` traffic on the wire after the initial settle (server elides clean broadcasts).
+- [ ] A late joiner sees the stationary item in its correct position immediately on entering the env (freshness AOI-enter bootstrap), not after the next movement.
+
+Freshness-matrix / receiver-contract scenarios:
+- [ ] **P1-alone-smooth-fall.** P1 joins RV Life alone. Presents and the cake fall at normal gravity speed (~9.8 m/s²). The cake settles on the floor without hovering or oscillating. Network tab shows P1 receives *zero* `item-state-update` payloads addressed to P1 that contain rows for items P1 is the resolved owner of. (Owner-pin invariant; fixes "presents dropping super slow" and "cake hovering and oscillating".)
+- [ ] **P2-joins-no-blur.** P1 is env-authority in RV Life with all items settled. P2 joins. P2 receives exactly one bootstrap `item-state-update` containing every item in the env before its local physics loop ticks; P2 sees items in their final positions with no initial blur/spin/whiz. (Env-entry seed-before-tick; fixes "items whizzing in a blur on P2".)
+- [ ] **Collectibles-visible-for-peers.** P1 collects a present. P2 sees that present disappear within one broadcast window, regardless of whether any corresponding `ItemInstanceState` row is present in the same payload. The `collections[]` entry alone is sufficient. (Receiver rule 1; fixes "P2 does not see collectibles disappear".)
+- [ ] **Leaver-orphan-reassignment-preserves-physics.** P1 is env-authority of RV Life with items settled. P2 is present in RV Life but has never claimed any item. P1 disconnects or env-switches out. The server emits `env-item-authority-changed(newAuthorityId = P2, reason = "failover" | "disconnect")`. P2's bodies for every RV Life item flip to `DYNAMIC`; P2 resumes publishing rows within one send-tick. Items in RV Life do not teleport, oscillate, or fall through the floor during the handoff. (Orphan reassignment + freshness re-pin.)
+- [ ] **Owner-receives-no-self-echo.** Any client that is resolved owner of any item MUST NOT receive any `updates[]` row for its own items, under any condition short of reconnect. Capture the SSE stream for a resolved owner over a 30-second window and grep for its own `instanceId`s — matches MUST be zero. (Owner-pin invariant.)
+- [ ] **Reconnect rehydrates.** A resolved owner briefly loses its SSE connection and reconnects. On reconnect the server treats it as an AOI enter — the first `item-state-update` burst includes every item in the env. The client MUST ignore rows for items it resolves as self-owned (defense-in-depth) and apply the rest.
 
 ### Production Testing
 
@@ -480,10 +953,69 @@ Use `npm run build` and deploy backend following [DEPLOYMENT.md](src/deployment/
 - Verify CORS headers if cross-origin
 - Check browser console for detailed errors
 
-### Synchronizer Not Broadcasting
-- Verify client has `isSynchronizer: true` from join response
-- Check `MultiplayerManager.on('character-state-update'...)` listeners are registered
-- Monitor network tab for PATCH requests
+### SSE events delayed by seconds (Brotli / proxy buffering)
+Symptom: character or item updates arrive in bursts every few seconds rather than continuously; chat or authority signals lag noticeably behind the wall clock.
+
+Diagnostic:
+- Inspect the response headers on `GET /api/multiplayer/stream` in devtools. You should see `Content-Encoding: br` (or `gzip`) and no `Content-Length`. If `Content-Length` is present the proxy is buffering the whole response; fix the proxy or set `MULTIPLAYER_SSE_COMPRESSION=off`.
+- If the server is direct-to-browser (no proxy) and you still see batching, the compression quality is too high. The reference implementation uses Brotli quality 4; confirm the middleware factory wasn't overridden with a higher quality.
+- Any intermediate proxy (nginx, Traefik, Cloudflare, corporate egress) MUST forward `Content-Encoding` unchanged on `/api/multiplayer/stream` and MUST NOT buffer chunks. For nginx: `proxy_buffering off;` on that location, and do not set `gzip on;` at that level.
+- As a last-resort workaround, restart the server with `MULTIPLAYER_SSE_COMPRESSION=off`. Latency will return to baseline but bandwidth will increase; see [MULTIPLAYER_SYNCH.md §9.1](MULTIPLAYER_SYNCH.md#91-sse-transport-compression-non-normative).
+
+### Base synchronizer not broadcasting (lights / sky / env particles)
+- Verify client has `isSynchronizer: true` from join response.
+- If a different client holds the role, check for `synchronizer-changed` signals in the SSE stream.
+- Check `MultiplayerManager.on('character-state-update'...)` and related listeners are registered.
+- Monitor the network tab for PATCH requests — non-synchronizer clients are expected to skip global-world PATCHes entirely.
+
+### Item not updating on peers (item ownership)
+- Verify either (a) `item-authority-changed` for the affected `instanceId` shows `newOwnerId` equal to the sender's `clientId` (explicit tier), or (b) `env-item-authority-changed` for the sender's current environment shows `newAuthorityId: sender` AND the item is not in any explicit `itemOwners` entry (env tier).
+- If the sender is neither the explicit owner nor the env-authority for the item's env, their rows are silently dropped by the server. For env cases, ensure the client observed `env-item-authority-changed` before publishing rows; for explicit cases, ensure the client emitted `PATCH /api/multiplayer/item-authority-claim` before publishing transforms.
+- On receivers: check that `ownerClientId` on the incoming `ItemInstanceState` row matches what the client believes. A mismatch usually indicates a missed `item-authority-changed` or `env-item-authority-changed` signal — reopen the SSE stream to trigger the bootstrap replays described in [§6.8](MULTIPLAYER_SYNCH.md#68-item-authority-changed) and [§6.9](MULTIPLAYER_SYNCH.md#69-env-item-authority-changed).
+- If two clients appear to both be "driving" the same item, confirm that the body's motion type is `ANIMATED` on every non-resolved-owner — local simulation there will produce exactly this symptom.
+
+### Dynamic item bounces wildly or disappears on env load
+Symptom: first client into an environment sees a free-falling item (e.g. RV Life cake) bouncing uncontrollably, teleporting into the floor, or becoming invisible.
+
+Diagnostic:
+- Open devtools and inspect the `env-item-authority-changed` signal stream. After joining the env there MUST be one such signal with `environmentName` equal to the loaded env and `newAuthorityId` equal to this client.
+- If no such signal arrives, no client is env-authority and every client keeps the item kinematic; the item cannot simulate gravity and later `item-state-update` rows from stale senders will be dropped. This is the core failure mode fixed by [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle).
+- Confirm `envAuthority` on the server shows this client as head of `envArrivalOrder[envName]`.
+- Confirm that on receiving env-authority the client flipped item bodies in that env to `DYNAMIC` (`PhysicsMotionType.DYNAMIC`) and resumed sampling.
+
+### Item rows reach the server but never appear on peers
+- Accepted rows may still be dropped by the **server-side dirty filter** if their position/rotation/velocity and categorical fields haven't changed beyond epsilon. Confirm the values genuinely differ from the cached state — temporarily lower the server epsilons or inject a large test displacement to verify broadcast path.
+- A client that enters an env and does not see any items usually indicates the **freshness matrix AOI-enter** hook was not invoked for that session's current env — verify `onEnvEnter` runs on initial join, on server-observed env switch, and on SSE reconnect.
+
+### Env-authority's own items hover / oscillate / fall in slow motion
+Symptom: P1 is the only client in an env; the cake hovers above the floor and oscillates; presents fall noticeably slower than gravity would predict. This is the classic resolved-owner self-echo loop.
+
+Diagnostic:
+- Capture the SSE stream for P1 and search for `item-state-update` payloads whose `updates[]` contains any `instanceId` that P1 is the resolved owner of. Under a conforming server, the count is zero. Any non-zero count indicates the **owner-pin invariant** ([§5.2.2](MULTIPLAYER_SYNCH.md#522-per-client-freshness-matrix) rule 2) is not being enforced; the server is echoing P1's own rows back and P1 is applying them via `setTargetTransform`, fighting its own dynamic body.
+- As an interim mitigation, verify the client-side defense-in-depth drop in `applyItemSnapshot` is in place: `if (authorityTracker.isOwnedBySelf(row.instanceId)) continue;`.
+- Permanent fix: the server's fan-out producer MUST build per-recipient payloads filtered by the freshness matrix, not broadcast a single payload to every SSE session.
+
+### Joining client sees items whizzing in a blur
+Symptom: P2 joins an environment after P1 has it settled; items appear to spin, jitter, or fly around for ~1 second before snapping into place.
+
+Diagnostic:
+- P2's local physics loop is ticking before the bootstrap `item-state-update` has been applied. Confirm `onEnvironmentLoaded` pauses the env-physics loop, holds every env item in `ANIMATED` motion type, and resumes only after the first `item-state-update` addressed to P2 for this env is applied.
+- Confirm the server emits a bootstrap per-recipient `item-state-update` on AOI enter. Under the freshness matrix that burst arrives in the first broadcast window after `onEnvEnter`; if it does not, check that `onEnvEnter` was called for P2 when P2 joined the env.
+
+### Peers do not see collected items disappear
+Symptom: P1 collects a present; P2's view still shows the present on the floor.
+
+Diagnostic:
+- Receivers MUST apply `collections[]` independently of `updates[]` (MULTIPLAYER_SYNCH.md §6.2 Receiver rule 1). If the client-side `applyItemSnapshot` only iterates `updates[]`, collections will be silently ignored whenever the collection payload arrives without a paired `ItemInstanceState` row.
+- Server-side: confirm `onCollectionAccepted` enqueues the event for every in-env client except the sender, regardless of freshness state for the item.
+
+### Orphan items after env-authority leaves
+Symptom: P1 (env-authority) leaves the env; P2 (no prior claim) is still present. Items stop moving or clients disagree about who should publish rows.
+
+Diagnostic:
+- Confirm `handleClientLeaveEnv` ran and emitted `env-item-authority-changed(newAuthorityId = P2, reason = "failover" | "env_switch" | "disconnect")`.
+- On P2: after receiving the signal, every item whose resolved owner is now P2 MUST flip from `ANIMATED` to `DYNAMIC` and P2 MUST begin publishing rows within one send-tick.
+- Server-side: confirm `onOwnerChange` was invoked and `markTerminalNextRow` was called so the next row from P2 is unconditionally DIRTY and delivered to every remaining in-env client via the freshness projection.
 
 ### Remote Characters Not Updating
 - Verify synchronizer is moving and generating updates

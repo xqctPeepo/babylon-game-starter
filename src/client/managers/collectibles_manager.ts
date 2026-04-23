@@ -28,6 +28,14 @@ export class CollectiblesManager {
   private static physicsItems = new Map<string, BABYLON.AbstractMesh>();
   private static physicsItemBodies = new Map<string, BABYLON.PhysicsAggregate>();
 
+  /**
+   * Callback invoked after any item is collected locally. Set by the multiplayer
+   * bootstrap so the synchronizer can record an `ItemCollectionEvent` for the wire.
+   */
+  public static onItemCollected:
+    | ((instanceId: string, itemName: string, creditsEarned: number) => void)
+    | null = null;
+
   // Cached particle systems for efficiency
   private static cachedParticleSystem: BABYLON.ParticleSystem | null = null;
   private static particleSystemPool: BABYLON.ParticleSystem[] = [];
@@ -99,7 +107,7 @@ export class CollectiblesManager {
           this.createCollectibleInstance(instanceId, instance, itemConfig);
         } else {
           // Process as non-collectible physics item
-          this.createPhysicsInstance(instanceId, instance);
+          this.createPhysicsInstance(instanceId, instance, itemConfig);
         }
       }
     }
@@ -254,7 +262,11 @@ export class CollectiblesManager {
   /**
    * Creates a non-collectible physics instance from the loaded model
    */
-  private static createPhysicsInstance(id: string, instance: ItemInstance): void {
+  private static createPhysicsInstance(
+    id: string,
+    instance: ItemInstance,
+    itemConfig: ItemConfig
+  ): void {
     if (!this.scene || !this.instanceBasis) {
       return;
     }
@@ -291,6 +303,7 @@ export class CollectiblesManager {
       // Store references for cleanup
       this.physicsItems.set(id, meshInstance);
       this.physicsItemBodies.set(id, physicsAggregate);
+      this.itemConfigs.set(id, itemConfig);
 
       // Apply glow effect if specified
       if (
@@ -440,6 +453,193 @@ export class CollectiblesManager {
     // Add credits (default to 0 if not specified or if not collectible)
     const creditValue = itemConfig.collectible ? (itemConfig.creditValue ?? 0) : 0;
     this.totalCredits += creditValue;
+
+    // Notify the multiplayer bootstrap so the synchronizer can broadcast the collection event.
+    try {
+      this.onItemCollected?.(id, itemConfig.name, creditValue);
+    } catch {
+      /* callback must not break gameplay */
+    }
+  }
+
+  /** Collectible meshes + their (possibly-disposed) physics aggregates for sampling / apply. */
+  public static *getCollectibleEntries(): IterableIterator<
+    [
+      string,
+      {
+        mesh: BABYLON.AbstractMesh;
+        body: BABYLON.PhysicsAggregate | null;
+        config: ItemConfig;
+      }
+    ]
+  > {
+    for (const [id, mesh] of this.collectibles) {
+      const config = this.itemConfigs.get(id);
+      if (!config) {
+        continue;
+      }
+      yield [id, { mesh, body: this.collectibleBodies.get(id) ?? null, config }];
+    }
+  }
+
+  /** Non-collectible physics items (e.g. Cake) tracked by the manager. */
+  public static *getPhysicsItemEntries(): IterableIterator<
+    [
+      string,
+      {
+        mesh: BABYLON.AbstractMesh;
+        body: BABYLON.PhysicsAggregate | null;
+        config: ItemConfig;
+      }
+    ]
+  > {
+    for (const [id, mesh] of this.physicsItems) {
+      const config = this.itemConfigs.get(id);
+      if (!config) {
+        continue;
+      }
+      yield [id, { mesh, body: this.physicsItemBodies.get(id) ?? null, config }];
+    }
+  }
+
+  /** Whether the instance with `id` has been locally collected already. */
+  public static isCollectedInstance(id: string): boolean {
+    return this.collectedItems.has(id);
+  }
+
+  /**
+   * Resolves an instance id (from either the collectible or physics-item map) to its
+   * mesh + optional physics body. Returns null if the id is not tracked.
+   */
+  public static getMeshAndBody(
+    id: string
+  ): { mesh: BABYLON.AbstractMesh; body: BABYLON.PhysicsAggregate | null } | null {
+    const coll = this.collectibles.get(id);
+    if (coll) {
+      return { mesh: coll, body: this.collectibleBodies.get(id) ?? null };
+    }
+    const phys = this.physicsItems.get(id);
+    if (phys) {
+      return { mesh: phys, body: this.physicsItemBodies.get(id) ?? null };
+    }
+    return null;
+  }
+
+  /** Looks up the config for a tracked instance id; used by the sampler for the wire itemName. */
+  public static getItemConfigForInstance(id: string): ItemConfig | null {
+    return this.itemConfigs.get(id) ?? null;
+  }
+
+  /**
+   * Flips every tracked collectible + physics-item body between kinematic (`ANIMATED`) and
+   * dynamic (`DYNAMIC`) motion types.
+   *
+   * The multiplayer bootstrap calls this with `kinematic=true` on non-synchronizer clients so
+   * Havok stops integrating forces on replicated bodies — without this, dynamic bodies drift
+   * under gravity and collisions between the ~120ms authoritative snapshots and appear to
+   * "fly around". Synchronizer clients set `kinematic=false` so they can run the authoritative
+   * simulation locally.
+   */
+  public static setAllItemsKinematic(kinematic: boolean): void {
+    const motionType = kinematic
+      ? BABYLON.PhysicsMotionType.ANIMATED
+      : BABYLON.PhysicsMotionType.DYNAMIC;
+
+    const applyTo = (aggregate: BABYLON.PhysicsAggregate): void => {
+      const body = aggregate.body;
+      if (!body || body.isDisposed) {
+        return;
+      }
+      try {
+        if (body.getMotionType() !== motionType) {
+          body.setMotionType(motionType);
+        }
+        if (kinematic) {
+          body.setLinearVelocity(BABYLON.Vector3.Zero());
+          body.setAngularVelocity(BABYLON.Vector3.Zero());
+        }
+      } catch {
+        /* Havok edge cases (e.g. body mid-initialization) — try again next frame */
+      }
+    };
+
+    for (const aggregate of this.collectibleBodies.values()) {
+      applyTo(aggregate);
+    }
+    for (const aggregate of this.physicsItemBodies.values()) {
+      applyTo(aggregate);
+    }
+  }
+
+  /**
+   * Flips the motion type of a single tracked item (collectible or physics item) between
+   * kinematic (ANIMATED) and dynamic (DYNAMIC). Used by the per-item authority pipeline so
+   * only items owned by the local client run a local dynamic simulation; peer-owned items
+   * remain kinematic and are teleported by incoming item-state rows.
+   */
+  public static setItemKinematic(localId: string, kinematic: boolean): boolean {
+    const aggregate =
+      this.collectibleBodies.get(localId) ?? this.physicsItemBodies.get(localId) ?? null;
+    if (!aggregate) {
+      return false;
+    }
+    const body = aggregate.body;
+    if (!body || body.isDisposed) {
+      return false;
+    }
+    const motionType = kinematic
+      ? BABYLON.PhysicsMotionType.ANIMATED
+      : BABYLON.PhysicsMotionType.DYNAMIC;
+    try {
+      if (body.getMotionType() !== motionType) {
+        body.setMotionType(motionType);
+      }
+      if (kinematic) {
+        body.setLinearVelocity(BABYLON.Vector3.Zero());
+        body.setAngularVelocity(BABYLON.Vector3.Zero());
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Idempotent, silent collection path for remote-driven state (non-synchronizer mirror).
+   * Mirrors the cleanup half of `collectItem` (dispose body, disable mesh, mark collected)
+   * but deliberately skips credits, inventory, effects, and sounds.
+   */
+  public static applyRemoteCollected(id: string): void {
+    if (this.collectedItems.has(id)) {
+      return;
+    }
+    const mesh = this.collectibles.get(id) ?? this.physicsItems.get(id);
+    if (!mesh) {
+      return;
+    }
+
+    this.collectedItems.add(id);
+
+    const aggregate = this.collectibleBodies.get(id) ?? this.physicsItemBodies.get(id);
+    if (aggregate) {
+      try {
+        aggregate.dispose();
+      } catch {
+        /* ignore */
+      }
+      this.collectibleBodies.delete(id);
+      this.physicsItemBodies.delete(id);
+      if ('physicsBody' in mesh && (mesh as { physicsBody?: unknown }).physicsBody) {
+        (mesh as { physicsBody: BABYLON.PhysicsBody | null }).physicsBody = null;
+      }
+    }
+
+    try {
+      mesh.setEnabled(false);
+      mesh.isVisible = false;
+    } catch {
+      /* ignore */
+    }
   }
 
   /**

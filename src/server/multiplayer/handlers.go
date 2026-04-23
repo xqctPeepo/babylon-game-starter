@@ -185,15 +185,35 @@ func (ms *MultiplayerServer) handleCharacterStateUpdate(w http.ResponseWriter, r
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-// handleItemStateUpdate processes item state updates from synchronizer
+// handleItemStateUpdate processes item state updates under the hybrid authority model
+// (MULTIPLAYER_SYNCH.md §5.2 / §7.5). Rows are filtered per-instance against the server's
+// itemOwners map:
+//
+//   - If the instance is currently owned and sender == owner: accept (refresh LastUpdatedAt).
+//   - If the instance is unowned and sender is the base synchronizer: accept (bootstrap /
+//     collectible transforms).
+//   - Otherwise: silently drop the row.
+//
+// ItemCollectionEvents are first-write-wins. Any row's claim of `isCollected=true` is
+// persisted into lastItemState so late joiners get the latest view.
 func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	if !ms.verifySynchronizer(r) {
-		http.Error(w, "Only synchronizer can update state", http.StatusForbidden)
+	sender := strings.TrimSpace(r.Header.Get("X-Client-ID"))
+	if sender == "" {
+		http.Error(w, "Missing X-Client-ID", http.StatusUnauthorized)
+		return
+	}
+
+	ms.mu.RLock()
+	_, known := ms.clients[sender]
+	syncID := ms.synchronizerID
+	ms.mu.RUnlock()
+	if !known {
+		http.Error(w, "Unknown client", http.StatusUnauthorized)
 		return
 	}
 
@@ -203,13 +223,74 @@ func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *htt
 		return
 	}
 
-	log.Printf("[ItemState] Update received: %v", update)
+	now := time.Now().UnixMilli()
+
+	filteredUpdates := make([]interface{}, 0)
+	droppedRows := 0
+
+	if rawUpdates, ok := update["updates"].([]interface{}); ok {
+		ms.mu.Lock()
+		for _, raw := range rawUpdates {
+			row, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			iid, _ := row["instanceId"].(string)
+			iid = strings.TrimSpace(iid)
+			if iid == "" {
+				continue
+			}
+
+			cur, exists := ms.itemOwners[iid]
+			accept := false
+			if exists && cur != nil {
+				if cur.OwnerClientID == sender {
+					cur.LastUpdatedAt = now
+					accept = true
+				}
+			} else {
+				if sender == syncID && syncID != "" {
+					accept = true
+				}
+			}
+
+			if !accept {
+				droppedRows++
+				continue
+			}
+
+			if o, ok := ms.itemOwners[iid]; ok && o != nil {
+				row["ownerClientId"] = o.OwnerClientID
+			} else if _, present := row["ownerClientId"]; !present {
+				row["ownerClientId"] = nil
+			}
+
+			filteredUpdates = append(filteredUpdates, row)
+		}
+		ms.mu.Unlock()
+	}
+
+	collections := update["collections"]
+
+	broadcast := map[string]interface{}{
+		"updates":   filteredUpdates,
+		"timestamp": update["timestamp"],
+	}
+	if collections != nil {
+		broadcast["collections"] = collections
+	}
 
 	ms.mu.Lock()
-	ms.lastItemState = update
+	ms.lastItemState = broadcast
 	ms.mu.Unlock()
 
-	ms.broadcastToAll("item-state-update", update)
+	if droppedRows > 0 {
+		log.Printf("[ItemState] Filtered %d unauthorized row(s) from sender=%s", droppedRows, sender)
+	}
+
+	if len(filteredUpdates) > 0 || collections != nil {
+		ms.broadcastToAll("item-state-update", broadcast)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -368,6 +449,8 @@ func (ms *MultiplayerServer) removeClient(clientID string) {
 	}
 	delete(ms.sessionIDToClientID, client.SessionID)
 
+	releasedItems := ms.releaseItemsOwnedByLocked(clientID)
+
 	remaining = len(ms.clients)
 	if wasSynchronizer && remaining > 0 {
 		newSyncID = ms.clientOrder[0]
@@ -382,6 +465,8 @@ func (ms *MultiplayerServer) removeClient(clientID string) {
 	ms.mu.Unlock()
 
 	log.Printf("[Leave] Client %s disconnected (WasSynchronizer: %v)", clientID, wasSynchronizer)
+
+	ms.broadcastAuthorityReleasesAfterDisconnect(clientID, releasedItems)
 
 	if shouldPromote {
 		log.Printf("[Synchronizer] Failover to %s", newSyncID)
@@ -489,6 +574,7 @@ func (ms *MultiplayerServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ms.registerSSESession(sessionID, sse)
 
 	ms.pushSnapshotToSession(sessionID)
+	ms.pushAuthoritySnapshotToSession(sessionID)
 
 	ms.mu.RLock()
 	total := len(ms.clients)

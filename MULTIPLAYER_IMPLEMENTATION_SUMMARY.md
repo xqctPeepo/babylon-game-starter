@@ -2,7 +2,13 @@
 
 ## 🎯 Objective
 
-Transform babylon-game-starter into a **multiplayer-capable game** using Datastar for real-time state synchronization. The first connected client acts as the "synchronizer," broadcasting entity updates to all other clients.
+Transform babylon-game-starter into a **multiplayer-capable game** using Datastar for real-time state synchronization, with a **three-tier authority model**:
+
+- **Tier 1 — Base synchronizer** (one client, global scope): broadcasts global world state (lights, sky effects, environment particles) to all other clients. See [MULTIPLAYER_SYNCH.md §4.6](MULTIPLAYER_SYNCH.md#46-base-synchronizer-changes).
+- **Tier 2 — Environment item authority** (one client per environment): the first client to enter an environment becomes the default owner of every item in that environment and runs its dynamic physics locally. Handed off in arrival order if the current authority leaves. This tier guarantees that every dynamic item always has exactly one client simulating gravity / contacts. See [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle).
+- **Tier 3 — Explicit item owner** (any client, per `instanceId`): a proximity claim lets a client override env-authority for one specific item until release. See [§4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle).
+
+Complementing the authority model, the server runs a **dirty filter** on item-state broadcasts: accepted rows are compared field-by-field (with epsilons) to a server-side `itemTransformCache`, and unchanged repeats are silently dropped so bandwidth tracks real motion rather than sampling rate. Late-joiners receive the cache on SSE open. See [§5.2](MULTIPLAYER_SYNCH.md#52-item-state).
 
 ---
 
@@ -105,24 +111,68 @@ Each sync module provides:
 
 ## 🏗️ Architecture Overview
 
-### Synchronizer Pattern
+### Three-Tier Authority Pattern
 
 ```
+Tier 1 — Base Synchronizer (global scope)
+───────────────────────────────────────────
 First Connected Client
          ↓
-   [Synchronizer Role Assigned]
+   [Base Synchronizer Role Assigned]      (lights / sky / env particles)
          ↓
-   [Primary Entity State Detector]
+   PATCH global-world PATCHes; server enforces role
          ↓
-   [PATCH Updates to Server]
+   Datastar broadcast → all clients
          ↓
-   [Server Broadcasts to All]
-         ↓
-   [All Clients Apply State]
+On Base-Synchronizer Disconnect:
+   Next client in queue → new base synchronizer
+   (item authority is independent; not transferred)
 
-On Synchronizer Disconnect:
-   Next Client in Queue → New Synchronizer
+
+Tier 2 — Environment Item Authority (per-env scope)
+───────────────────────────────────────────────────
+Client enters environment E (join or env switch)
+         ↓
+   Server appends client to envArrivalOrder[E]
+         ↓
+   If envAuthority[E] was empty:
+         envAuthority[E] ← client
+         broadcast env-item-authority-changed (reason: "arrival")
+         ↓
+   Client flips every unclaimed item in E to DYNAMIC locally
+   and publishes item-state rows for them.
+
+On env-authority leave / disconnect / env switch:
+   Remove client from envArrivalOrder[E]
+         ↓
+   Promote new head (or clear if empty)
+         ↓
+   broadcast env-item-authority-changed
+     (reason: "failover" | "disconnect" | "env_switch")
+
+
+Tier 3 — Explicit Item Owner (per-instanceId scope)
+───────────────────────────────────────────────────
+Client enters proximity bubble of item I
+         ↓
+   PATCH /api/multiplayer/item-authority-claim
+         ↓
+   Server updates itemOwners; broadcasts item-authority-changed
+         ↓
+   Owner PATCHes item-state rows for I (overrides env-authority for I)
+
+Server per-row filter for item-state:
+   1. If itemOwners[I] exists, accept only from itemOwners[I].ownerClientId
+   2. Else accept only from envAuthority[env(I)]
+   3. Else drop silently
+
+Server dirty filter (after row acceptance):
+   Compare row to itemTransformCache[I]
+   If CLEAN (within epsilons) → refresh lastUpdatedAt, drop from broadcast
+   If DIRTY → update cache, include in broadcast
 ```
+
+See [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle), [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle), and [§5.2](MULTIPLAYER_SYNCH.md#52-item-state) for the normative rules.
 
 ### Update Flow
 
@@ -137,7 +187,7 @@ MultiplayerManager.updateCharacterState()
     ↓
 PATCH /api/multiplayer/character-state
     ↓
-Server Validates (Synchronizer Check)
+Server Validates (role-scoped per-row: base synchronizer for global world; explicit owner for claimed items; env-authority for unclaimed items in its env) + dirty filter on item rows
     ↓
 Datastar SIGNAL: "character-state-update"
     ↓
@@ -325,7 +375,8 @@ private updateStatus(): void {
 
 ## 🔐 Security Features
 
-- ✅ **Synchronizer-Only Updates**: Server validates all state updates come from synchronizer
+- ✅ **Role-scoped per-row authority**: Global world state (lights / sky / env particles) is base-synchronizer-only; item rows are filtered per `instanceId` by resolved owner — explicit owner for claimed items, env-authority for unclaimed items in its env, drop otherwise ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)). Base synchronizer has **no** item write privilege.
+- ✅ **Server-side dirty filter**: unchanged item-state rows are dropped from the broadcast to reduce bandwidth; late-joiners receive the cache on SSE open ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)).
 - ✅ **Timestamp Validation**: Rejects updates older than 30 seconds
 - ✅ **Position Bounds**: Validates positions within ±10000 units
 - ✅ **Animation Validation**: Only accepts known animation states
@@ -359,11 +410,24 @@ With 4 players, each moving:
 ## 🧪 Testing Checklist
 
 - [ ] Backend runs without errors
-- [ ] Client 1 connects and becomes synchronizer
+- [ ] Client 1 connects and becomes base synchronizer
 - [ ] Client 2 connects and becomes member
 - [ ] Client 1 moves → appears on Client 2
 - [ ] Client 1 collects item → syncs to Client 2
-- [ ] Client 1 disconnects → Client 2 becomes synchronizer
+- [ ] First client into an environment automatically becomes env-authority (`env-item-authority-changed`, `reason: "arrival"`)
+- [ ] Items that free-fall on env load (e.g. RV Life cake) settle correctly on Client 1's simulation and appear already-settled to late-joining Client 2
+- [ ] Client 1 walks up to a dynamic item → Client 2 receives `item-authority-changed` naming Client 1 as explicit owner
+- [ ] When env-authority leaves an env, the next arrival in that env is promoted (`reason: "failover"` / `"env_switch"` / `"disconnect"`)
+- [ ] Client 1 disconnects → Client 2 becomes base synchronizer and, if they were next in the arrival order of any env, env-authority for those envs
+- [ ] Stationary items produce no wire traffic after settling (server-side dirty filter suppresses clean repeats)
+- [ ] **P1-alone-smooth-fall**: P1 alone in RV Life — presents fall at real-gravity speed, cake settles without hover/oscillation; P1 receives zero `updates[]` rows for items P1 is resolved owner of (owner-pin invariant)
+- [ ] **P2-joins-no-blur**: P2 joining an env with settled items sees them in their final positions; no spin/jitter/whiz during entry; local physics loop paused until bootstrap `item-state-update` is applied (env-entry seed-before-tick)
+- [ ] **Collectibles-visible-for-peers**: P1 collects an item → P2 sees it disappear within one broadcast window, independent of whether an `ItemInstanceState` row for it is present in the same payload (receiver rule 1 — collections applied independently)
+- [ ] **Leaver-orphan-reassignment-preserves-physics**: P1 is env-authority of RV Life; P2 is present with no prior claims; P1 disconnects/env-switches → P2 receives `env-item-authority-changed` and resumes publishing rows within one send-tick; items do not teleport, oscillate, or fall through the floor during the handoff
+- [ ] **Owner-receives-no-self-echo**: capture 30 seconds of SSE for any resolved owner; grep its own `instanceId`s in `updates[]` — zero matches (owner-pin invariant, §5.2.2 rule 2)
+- [ ] **Reconnect rehydrates**: resolved owner with a brief SSE disconnect → on reconnect receives a bootstrap `item-state-update` burst (AOI re-enter); client-side defense-in-depth drops rows it resolves as self-owned
+- [ ] **SSE-Brotli-active**: `GET /api/multiplayer/stream` response headers show `Content-Encoding: br` (or `gzip` if `MULTIPLAYER_SSE_COMPRESSION=gzip`) and no `Content-Length`; events still arrive continuously with sub-50ms frame-to-frame latency (no batching)
+- [ ] **SSE-compression-opt-out**: restarting the server with `MULTIPLAYER_SSE_COMPRESSION=off` removes the `Content-Encoding` header and the stream still functions identically, validating the escape hatch for proxy troubleshooting
 - [ ] 3+ clients can connect simultaneously
 - [ ] Network tab shows PATCH requests
 - [ ] Console shows no errors
@@ -413,8 +477,14 @@ With 4 players, each moving:
 
 ✅ Synchronized state interfaces for all entities  
 ✅ Datastar-based SSE communication  
-✅ Automatic synchronizer role assignment  
-✅ Synchronized failover (if sync disconnects)  
+✅ Automatic base-synchronizer role assignment  
+✅ Base-synchronizer failover on disconnect (global world state)  
+✅ Per-item explicit authority model (claim / release / `item-authority-changed`) — see [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle)  
+⏳ Environment item authority (first-in-env + ordered failover + `env-item-authority-changed`) — see [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle); implementation pending  
+⏳ Server-side item-transform dirty filter (`itemTransformCache`) — see [§5.2.1](MULTIPLAYER_SYNCH.md#521-global-dirty-filter-server-side-transform-cache); implementation pending  
+⏳ Per-client freshness matrix with owner-pin, AOI enter/leave rehydrate, ownership-transition re-pin, orphan reassignment, and per-recipient fan-out — see [§5.2.2](MULTIPLAYER_SYNCH.md#522-per-client-freshness-matrix); implementation pending  
+⏳ Receiver contract: self-owner drop, non-owner kinematic apply, collections-applied-independently, env-entry seed-before-tick — see [§6.2](MULTIPLAYER_SYNCH.md#62-item-state-update) Receiver rules; implementation pending  
+✅ SSE transport compression (Brotli by default, flush-aware, `MULTIPLAYER_SSE_COMPRESSION=brotli|gzip|off`) — see [MULTIPLAYER_SYNCH.md §9.1](MULTIPLAYER_SYNCH.md#91-sse-transport-compression-non-normative)  
 ✅ Throttled updates (50-100ms) for performance  
 ✅ Significant-change detection to reduce bandwidth  
 ✅ Security validation on server  
@@ -463,11 +533,20 @@ Your multiplayer implementation is **complete** when:
 ✅ Backend listens on `http://localhost:5000`  
 ✅ 2+ clients can connect simultaneously  
 ✅ Character movement syncs between clients  
-✅ Items collected sync to all clients  
-✅ First client is marked as synchronizer  
-✅ On disconnect, next client becomes synchronizer  
+✅ Items collected sync to all clients, independent of paired `ItemInstanceState` rows (receiver rule 1)  
+✅ First client is marked as base synchronizer  
+✅ On disconnect, next client becomes base synchronizer (global world state); item owners are released independently  
+✅ **First client to enter an environment automatically owns its items; ordered failover on leave** (env-item-authority, [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle))  
+✅ **Free-falling items settle correctly without bouncing / disappearing** on first env load (P1-alone-smooth-fall), and late joiners see them already settled without a blur phase (P2-joins-no-blur, env-entry seed-before-tick)  
+✅ **Resolved owners never receive `updates[]` rows for their own items** (owner-pin invariant, [§5.2.2](MULTIPLAYER_SYNCH.md#522-per-client-freshness-matrix) rule 2)  
+✅ **Orphaned items are reassigned within one server tick on env-authority departure** (leaver-orphan-reassignment-preserves-physics, [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle) rule 8)  
+✅ **Stationary items produce no item-state traffic** (server-side dirty filter suppresses clean repeats)  
 ✅ No console errors  
 ✅ Network requests show PATCH updates  
+
+### Deferred follow-ups
+
+- **Versioned freshness cells.** The per-client freshness matrix currently uses a boolean cell, which is sufficient under TCP-reliable SSE + reconnect-equals-full-rehydrate. Upgrade to a monotonic per-cell version integer (the full Wuu-Bernstein 2DTT form) unlocks client-side acks, partial rehydrate on reconnect, message-loss tolerance without connection reset, and multi-region replication. Full rationale and upgrade sketch in [MULTIPLAYER_SYNCH.md §10 *Future evolution of the freshness cell*](MULTIPLAYER_SYNCH.md#future-evolution-of-the-freshness-cell-non-normative) and [MULTIPLAYER_PLAN.md *Future: versioned freshness cells*](MULTIPLAYER_PLAN.md#future-versioned-freshness-cells).
 
 ---
 

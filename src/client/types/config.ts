@@ -72,6 +72,12 @@ export interface MultiplayerConfig {
   readonly CONNECTION_TIMEOUT_MS: number;
   /** When no `VITE_MULTIPLAYER_HOST`: try `PRODUCTION_SERVER` before `LOCAL_SERVER`. */
   readonly PRODUCTION_FIRST: boolean;
+  /** Per-item authority proximity claim radius in world-space meters (MULTIPLAYER_SYNCH.md §4.7). */
+  readonly CLAIM_RADIUS_METERS: number;
+  /** Grace period (ms) after bubble exit before the owner releases authority. */
+  readonly CLAIM_GRACE_MS: number;
+  /** Server-side idle timeout (ms) after which another claim can override a stale owner. */
+  readonly CLAIM_IDLE_TIMEOUT_MS: number;
 }
 
 export interface GameConfig {

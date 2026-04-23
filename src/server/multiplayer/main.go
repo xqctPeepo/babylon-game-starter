@@ -20,6 +20,12 @@ type ClientConnection struct {
 	CharacterName   string
 }
 
+// ItemOwner is the server-side record of per-item authority (MULTIPLAYER_SYNCH.md §4.7).
+type ItemOwner struct {
+	OwnerClientID string
+	LastUpdatedAt int64 // wall-clock ms
+}
+
 // MultiplayerServer manages all connected clients and state synchronization
 type MultiplayerServer struct {
 	mu                  sync.RWMutex
@@ -34,6 +40,10 @@ type MultiplayerServer struct {
 	lastItemState map[string]interface{}
 	// Last known pose per clientId (merged from character-state PATCHes).
 	lastCharacterStates map[string]interface{}
+	// Per-item authority map (§4.7). Keyed by instanceId.
+	itemOwners map[string]*ItemOwner
+	// Idle-timeout threshold (milliseconds) used when arbitrating claims (§4.7 rule 2c).
+	claimIdleTimeoutMs int64
 }
 
 // NewMultiplayerServer creates a new multiplayer server
@@ -45,6 +55,8 @@ func NewMultiplayerServer(maxClients int) *MultiplayerServer {
 		sessionIDToClientID: make(map[string]string),
 		sseSessions:         make(map[string]*datastar.ServerSentEventGenerator),
 		lastCharacterStates: make(map[string]interface{}),
+		itemOwners:          make(map[string]*ItemOwner),
+		claimIdleTimeoutMs:  1500,
 	}
 }
 
@@ -71,6 +83,8 @@ func (ms *MultiplayerServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/multiplayer/effects-state", ms.handleEffectsStateUpdate)
 	mux.HandleFunc("/api/multiplayer/lights-state", ms.handleLightsStateUpdate)
 	mux.HandleFunc("/api/multiplayer/sky-effects-state", ms.handleSkyEffectsStateUpdate)
+	mux.HandleFunc("/api/multiplayer/item-authority-claim", ms.handleItemAuthorityClaim)
+	mux.HandleFunc("/api/multiplayer/item-authority-release", ms.handleItemAuthorityRelease)
 }
 
 // broadcastToAll sends a signal to all connected clients via Datastar patch-signals SSE.
@@ -205,8 +219,8 @@ func main() {
 		port = ":" + port
 	}
 
-	handler := withCORS(mux)
-	log.Printf("[Multiplayer Server] Listening on %s (set PORT to override; CORS via MULTIPLAYER_CORS_ALLOW_ORIGIN)", port)
+	handler := withCORS(withCompression(mux))
+	log.Printf("[Multiplayer Server] Listening on %s (set PORT to override; CORS via MULTIPLAYER_CORS_ALLOW_ORIGIN; compression via MULTIPLAYER_SSE_COMPRESSION)", port)
 	if err := http.ListenAndServe(port, handler); err != nil {
 		log.Fatalf("[Multiplayer Server] Failed to start: %v", err)
 	}

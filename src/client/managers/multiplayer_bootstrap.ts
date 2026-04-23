@@ -4,28 +4,53 @@
 
 import { ASSETS } from '../config/assets';
 import { CONFIG } from '../config/game_config';
-import { yawRadiansToWireQuaternion, toMultiplayerAnimationStateToken } from '../utils/multiplayer_serialization';
-
+import {
+  applyRemoteConfiguredCollections,
+  applyRemoteConfiguredItemState,
+  envScopedInstanceId,
+  parseEnvScopedInstanceId,
+  sampleConfiguredItems
+} from '../sync/configured_items_sync';
+import {
+  ENV_PHYSICS_ITEM_MARKER,
+  applyRemoteEnvironmentPhysicsState,
+  makeEnvironmentPhysicsInstanceId,
+  meshNameFromEnvironmentInstanceId,
+  sampleEnvironmentPhysicsStates,
+  setEnvironmentPhysicsMeshKinematic
+} from '../sync/environment_physics_sync';
+import { ItemAuthorityTracker } from '../sync/item_authority_tracker';
+import { ItemSync } from '../sync/item_sync';
 import {
   coerceCharacterState,
   coerceItemInstanceState
 } from '../sync/multiplayer_wire_guards';
+import {
+  ProximityClaimObserver,
+  type ProximityItem
+} from '../sync/proximity_claim_observer';
+import { yawRadiansToWireQuaternion, toMultiplayerAnimationStateToken } from '../utils/multiplayer_serialization';
+
+import { CollectiblesManager } from './collectibles_manager';
 import { getMultiplayerManager } from './multiplayer_manager';
 import {
   applyRemotePeerState,
   refreshRemotePeerVisibilityForLocalEnvironment,
   removeRemotePeer
 } from './remote_peer_proxy';
-import {
-  ENV_PHYSICS_ITEM_MARKER,
-  applyRemoteEnvironmentPhysicsState,
-  sampleEnvironmentPhysicsStates
-} from '../sync/environment_physics_sync';
-import { ItemSync } from '../sync/item_sync';
+
+
 
 import type { SceneManager } from './scene_manager';
 import type { CharacterController } from '../controllers/character_controller';
-import type { CharacterState, CharacterStateUpdate, ItemStateUpdate } from '../types/multiplayer';
+import type {
+  CharacterState,
+  CharacterStateUpdate,
+  ItemAuthorityChangedMessage,
+  ItemCollectionEvent,
+  ItemInstanceState,
+  ItemStateUpdate
+} from '../types/multiplayer';
 
 const SYNC_INTERVAL_MS = 80;
 const WORLD_PHYS_SYNC_MS = 120;
@@ -152,22 +177,49 @@ export async function initMultiplayerAfterCharacterReady(
     }
   });
 
-  const unsubItems = mp.on('item-state-update', (raw: unknown) => {
-    if (mp.isSynchronizer()) {
-      return;
-    }
-    const msg = raw as ItemStateUpdate;
-    if (!msg?.updates?.length) {
-      return;
-    }
+  const authorityTracker = new ItemAuthorityTracker();
+
+  /** Last `item-state-update` we applied; re-run on environment change for late-join alignment. */
+  let lastAppliedItemSnapshot: ItemStateUpdate | null = null;
+
+  const applyItemSnapshot = (msg: ItemStateUpdate): void => {
     const envName = sceneManager.getCurrentEnvironment();
-    for (const rawSt of msg.updates) {
-      const st = coerceItemInstanceState(rawSt);
-      if (!st || st.itemName !== ENV_PHYSICS_ITEM_MARKER) {
-        continue;
+    if (msg.updates?.length) {
+      for (const rawSt of msg.updates) {
+        const st = coerceItemInstanceState(rawSt);
+        if (!st) {
+          continue;
+        }
+        if (authorityTracker.isOwnedBySelf(st.instanceId)) {
+          continue;
+        }
+        if (st.itemName === ENV_PHYSICS_ITEM_MARKER) {
+          applyRemoteEnvironmentPhysicsState(scene, envName, st);
+        } else {
+          applyRemoteConfiguredItemState(envName, st);
+        }
       }
-      applyRemoteEnvironmentPhysicsState(scene, envName, st);
     }
+    if (msg.collections?.length) {
+      applyRemoteConfiguredCollections(envName, msg.collections);
+    }
+  };
+
+  const unsubItems = mp.on('item-state-update', (raw: unknown) => {
+    const msg = raw as ItemStateUpdate;
+    if (!msg || (!msg.updates?.length && !msg.collections?.length)) {
+      return;
+    }
+    applyItemSnapshot(msg);
+    lastAppliedItemSnapshot = msg;
+  });
+
+  const unsubAuthority = mp.on('item-authority-changed', (raw: unknown) => {
+    const msg = raw as ItemAuthorityChangedMessage;
+    if (!msg?.instanceId) {
+      return;
+    }
+    authorityTracker.applyAuthorityChange(msg);
   });
 
   try {
@@ -177,6 +229,7 @@ export async function initMultiplayerAfterCharacterReady(
     unsubState();
     unsubLeft();
     unsubItems();
+    unsubAuthority();
     return;
   }
 
@@ -185,13 +238,170 @@ export async function initMultiplayerAfterCharacterReady(
     unsubState();
     unsubLeft();
     unsubItems();
+    unsubAuthority();
     return;
   }
 
+  authorityTracker.setSelfClientId(clientId);
+
   const worldPhysicsItemSync = new ItemSync(WORLD_PHYS_SYNC_MS);
   let lastTrackedEnvironment = sceneManager.getCurrentEnvironment();
+  let lastEnvironmentLoaded = sceneManager.isEnvironmentLoaded();
   /** When local scene changes only — remote proxies show/hide via cached peer state. */
   let lastPeerVisibilityEnv = '';
+
+  /**
+   * Feed every local collection into the world ItemSync so the broadcast includes
+   * `collections` + keeps the item's `isCollected` flag true in its next updates snapshot.
+   * Collections are first-write-wins on the server, so any client may publish — we do not
+   * gate on base-synchronizer role here.
+   */
+  CollectiblesManager.onItemCollected = (
+    localId: string,
+    itemName: string,
+    creditsEarned: number
+  ): void => {
+    const envName = sceneManager.getCurrentEnvironment();
+    if (!envName) {
+      return;
+    }
+    const instanceId = envScopedInstanceId(envName, localId);
+    const ev: ItemCollectionEvent = {
+      instanceId,
+      itemName,
+      collectedByClientId: clientId,
+      creditsEarned,
+      timestamp: Date.now()
+    };
+    worldPhysicsItemSync.recordCollection(ev);
+    worldPhysicsItemSync.markItemCollected(instanceId, true);
+  };
+
+  const unsubSyncChanged = mp.on('synchronizer-changed', () => {
+    if (mp.isSynchronizer()) {
+      worldPhysicsItemSync.clearAll();
+    }
+  });
+
+  // Per-item motion-type flip driven by the authority tracker. Each client keeps peer-owned
+  // items kinematic (ANIMATED) so local Havok does not fight the authoritative
+  // `setTargetTransform` updates, and flips its own items to DYNAMIC so collisions produce
+  // real motion that the owner then broadcasts.
+  const applyMotionTypeForInstance = (instanceId: string, dynamic: boolean): void => {
+    const envNow = sceneManager.getCurrentEnvironment();
+    const parsed = parseEnvScopedInstanceId(instanceId);
+    if (parsed && parsed.envName === envNow) {
+      CollectiblesManager.setItemKinematic(parsed.localId, !dynamic);
+      return;
+    }
+    const meshName = meshNameFromEnvironmentInstanceId(envNow, instanceId);
+    if (meshName) {
+      setEnvironmentPhysicsMeshKinematic(scene, meshName, !dynamic);
+    }
+  };
+
+  const unsubAuthorityChange = authorityTracker.onChange((evt) => {
+    applyMotionTypeForInstance(evt.instanceId, evt.selfOwnsNow);
+  });
+
+  // ---- Proximity claim observer ----
+  const claimCfg = CONFIG.MULTIPLAYER;
+  const proximity = new ProximityClaimObserver(mp, authorityTracker, {
+    claimRadiusMeters: claimCfg.CLAIM_RADIUS_METERS,
+    claimGraceMs: claimCfg.CLAIM_GRACE_MS,
+    getCharacterPosition: () => {
+      const m = ctrl.getPlayerMesh();
+      return m && !m.isDisposed() ? m.position : null;
+    },
+    shouldPause: () => !sceneManager.isEnvironmentLoaded()
+  });
+
+  const rebuildProximityItems = (envName: string): void => {
+    if (!envName || !sceneManager.isEnvironmentLoaded()) {
+      proximity.clear();
+      return;
+    }
+    const items: ProximityItem[] = [];
+
+    for (const [localId, entry] of CollectiblesManager.getPhysicsItemEntries()) {
+      const instanceId = envScopedInstanceId(envName, localId);
+      items.push({
+        instanceId,
+        getPosition: () => {
+          const m = entry.mesh;
+          if (!m || m.isDisposed()) {
+            return null;
+          }
+          try {
+            return m.getAbsolutePosition ? m.getAbsolutePosition() : m.absolutePosition;
+          } catch {
+            return null;
+          }
+        }
+      });
+    }
+
+    const envCfg = ASSETS.ENVIRONMENTS.find((e) => e.name === envName);
+    if (envCfg) {
+      for (const po of envCfg.physicsObjects) {
+        if (po.mass <= 0 || !po.name || po.name.trim() === '') {
+          continue;
+        }
+        const instanceId = makeEnvironmentPhysicsInstanceId(envName, po.name);
+        items.push({
+          instanceId,
+          getPosition: () => {
+            const m = scene.getMeshByName(po.name);
+            if (!m || m.isDisposed()) {
+              return null;
+            }
+            try {
+              return m.getAbsolutePosition ? m.getAbsolutePosition() : m.absolutePosition;
+            } catch {
+              return null;
+            }
+          }
+        });
+      }
+    }
+
+    proximity.setItems(items);
+  };
+
+  // Default every dynamic item in the current env to kinematic. The tracker flips back to
+  // DYNAMIC on per-item ownership changes.
+  const seedMotionTypesForEnv = (envName: string): void => {
+    if (!envName || !sceneManager.isEnvironmentLoaded()) {
+      return;
+    }
+    for (const [localId] of CollectiblesManager.getPhysicsItemEntries()) {
+      const instanceId = envScopedInstanceId(envName, localId);
+      const dyn = authorityTracker.isOwnedBySelf(instanceId);
+      CollectiblesManager.setItemKinematic(localId, !dyn);
+    }
+    const envCfg = ASSETS.ENVIRONMENTS.find((e) => e.name === envName);
+    if (envCfg) {
+      for (const po of envCfg.physicsObjects) {
+        if (po.mass <= 0 || !po.name) {
+          continue;
+        }
+        const instanceId = makeEnvironmentPhysicsInstanceId(envName, po.name);
+        const dyn = authorityTracker.isOwnedBySelf(instanceId);
+        setEnvironmentPhysicsMeshKinematic(scene, po.name, !dyn);
+      }
+    }
+  };
+
+  // ---- Sample gate: publish only rows this client is authorized to publish ----
+  const includeRow = (st: ItemInstanceState): boolean => {
+    if (authorityTracker.isOwnedBySelf(st.instanceId)) {
+      return true;
+    }
+    if (authorityTracker.isUnowned(st.instanceId) && mp.isSynchronizer()) {
+      return true;
+    }
+    return false;
+  };
 
   let lastSend = 0;
 
@@ -201,9 +411,27 @@ export async function initMultiplayerAfterCharacterReady(
     }
 
     const envNow = sceneManager.getCurrentEnvironment();
+    const envLoadedNow = sceneManager.isEnvironmentLoaded();
     if (envNow !== lastTrackedEnvironment) {
       lastTrackedEnvironment = envNow;
       worldPhysicsItemSync.clearAll();
+      proximity.clear();
+      lastEnvironmentLoaded = envLoadedNow;
+      if (envLoadedNow) {
+        seedMotionTypesForEnv(envNow);
+        rebuildProximityItems(envNow);
+      }
+    } else if (envLoadedNow && !lastEnvironmentLoaded) {
+      // Environment finished (re)loading — re-apply last authoritative snapshot so a
+      // late joiner immediately sees collected presents and repositioned cake.
+      lastEnvironmentLoaded = true;
+      if (lastAppliedItemSnapshot) {
+        applyItemSnapshot(lastAppliedItemSnapshot);
+      }
+      seedMotionTypesForEnv(envNow);
+      rebuildProximityItems(envNow);
+    } else {
+      lastEnvironmentLoaded = envLoadedNow;
     }
 
     if (envNow !== lastPeerVisibilityEnv) {
@@ -211,13 +439,27 @@ export async function initMultiplayerAfterCharacterReady(
       refreshRemotePeerVisibilityForLocalEnvironment(scene, envNow);
     }
 
-    if (mp.isSynchronizer() && sceneManager.isEnvironmentLoaded()) {
+    if (envLoadedNow) {
+      proximity.tick();
+
       const physStates = sampleEnvironmentPhysicsStates(scene, envNow);
       for (const st of physStates) {
-        worldPhysicsItemSync.updateItemState(st);
+        if (includeRow(st)) {
+          worldPhysicsItemSync.updateItemState(st);
+        }
+      }
+      const itemStates = sampleConfiguredItems(envNow);
+      for (const st of itemStates) {
+        if (st.isCollected) {
+          worldPhysicsItemSync.updateItemState(st);
+          continue;
+        }
+        if (includeRow(st)) {
+          worldPhysicsItemSync.updateItemState(st);
+        }
       }
       const worldUpdate = worldPhysicsItemSync.createStateUpdate(Date.now());
-      if (worldUpdate?.updates?.length) {
+      if (worldUpdate && ((worldUpdate.updates?.length ?? 0) > 0 || (worldUpdate.collections?.length ?? 0) > 0)) {
         void mp.updateItemState(worldUpdate);
       }
     }
@@ -240,5 +482,12 @@ export async function initMultiplayerAfterCharacterReady(
     unsubState();
     unsubLeft();
     unsubItems();
+    unsubAuthority();
+    unsubSyncChanged();
+    unsubAuthorityChange();
+    proximity.clear();
+    if (CollectiblesManager.onItemCollected) {
+      CollectiblesManager.onItemCollected = null;
+    }
   });
 }

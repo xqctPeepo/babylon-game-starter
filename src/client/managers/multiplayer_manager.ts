@@ -18,7 +18,12 @@ import type {
   SkyEffectStateUpdate,
   CharacterStateUpdate,
   SynchronizerChangedMessage,
-  ClientConnectionEvent
+  ClientConnectionEvent,
+  ItemAuthorityChangedMessage,
+  ItemAuthorityClaim,
+  ItemAuthorityClaimResponse,
+  ItemAuthorityRelease,
+  ItemAuthorityReleaseResponse
 } from '../types/multiplayer';
 
 export interface MultiplayerManagerConfig {
@@ -220,14 +225,14 @@ export class MultiplayerManager {
   }
 
   /**
-   * Sends item state update (synchronizer only)
+   * Sends item state update. Under the hybrid authority model (MULTIPLAYER_SYNCH.md §5.2)
+   * any connected client may PATCH this endpoint; the server filters rows per-instance:
+   *   - Owner-owned rows (`instanceId` in server's itemOwners) are accepted only from the owner.
+   *   - Unowned rows are accepted only from the base synchronizer (bootstrap / collectibles).
+   * Unauthorized rows are silently dropped. Callers should still only send rows they
+   * own, plus collectible bootstrap rows if they are the base synchronizer.
    */
   public async updateItemState(update: ItemStateUpdate): Promise<void> {
-    if (!this.isSynchronizer()) {
-      console.warn('[MultiplayerManager] Only synchronizer can update item state');
-      return;
-    }
-
     const st = this.clientState;
     if (!st) {
       return;
@@ -246,6 +251,81 @@ export class MultiplayerManager {
       );
     } catch (error) {
       console.error('[MultiplayerManager] Failed to update item state:', error);
+    }
+  }
+
+  /**
+   * Claim per-item authority (MULTIPLAYER_SYNCH.md §5.6 / §4.7). Resolves with the server's
+   * decision: `accepted=true` means this client now (or still) owns the `instanceId` and may
+   * publish rows for it. `accepted=false` indicates a live owner held the lock; `currentOwnerId`
+   * reports who.
+   *
+   * The server also broadcasts an `item-authority-changed` SSE signal on transitions, which
+   * {@link ItemAuthorityTracker} listens to so every client converges on the same view.
+   */
+  public async claimItemAuthority(
+    instanceId: string,
+    opts?: { clientPosition?: { x: number; y: number; z: number }; reason?: string }
+  ): Promise<ItemAuthorityClaimResponse | null> {
+    const st = this.clientState;
+    if (!st) {
+      return null;
+    }
+    const body: ItemAuthorityClaim = {
+      instanceId,
+      clientPosition: opts?.clientPosition,
+      reason: opts?.reason,
+      timestamp: Date.now()
+    };
+    const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
+    try {
+      const res = await fetch(`${origin}/api/multiplayer/item-authority-claim`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-Client-ID': st.clientId },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        return null;
+      }
+      return (await res.json()) as ItemAuthorityClaimResponse;
+    } catch (error) {
+      console.warn('[MultiplayerManager] Claim failed:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Release per-item authority (MULTIPLAYER_SYNCH.md §5.7). Idempotent; returns the server's
+   * echoed decision. A corresponding `item-authority-changed` SSE signal is broadcast only
+   * when this call actually transitions ownership.
+   */
+  public async releaseItemAuthority(
+    instanceId: string,
+    opts?: { reason?: string }
+  ): Promise<ItemAuthorityReleaseResponse | null> {
+    const st = this.clientState;
+    if (!st) {
+      return null;
+    }
+    const body: ItemAuthorityRelease = {
+      instanceId,
+      reason: opts?.reason,
+      timestamp: Date.now()
+    };
+    const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
+    try {
+      const res = await fetch(`${origin}/api/multiplayer/item-authority-release`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-Client-ID': st.clientId },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        return null;
+      }
+      return (await res.json()) as ItemAuthorityReleaseResponse;
+    } catch (error) {
+      console.warn('[MultiplayerManager] Release failed:', error);
+      return null;
     }
   }
 
@@ -345,6 +425,7 @@ export class MultiplayerManager {
       | 'lights-state-update'
       | 'sky-effects-state-update'
       | 'synchronizer-changed'
+      | 'item-authority-changed'
       | 'client-joined'
       | 'client-left',
     listener: MultiplayerEmitHandler
@@ -433,7 +514,14 @@ export class MultiplayerManager {
       this.emit('client-left', data);
     });
 
-    this.unsubscribers.push(unsub1, unsub2, unsub3, unsub4, unsub5, unsub6, unsub7, unsub8);
+    const unsub9 = this.datastarClient.onSignal<ItemAuthorityChangedMessage>(
+      'item-authority-changed',
+      (data) => {
+        this.emit('item-authority-changed', data);
+      }
+    );
+
+    this.unsubscribers.push(unsub1, unsub2, unsub3, unsub4, unsub5, unsub6, unsub7, unsub8, unsub9);
 
     // Connect to SSE
     await this.datastarClient.connect();
