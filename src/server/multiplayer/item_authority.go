@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+// envNameFromInstanceID extracts the environment name from an env-scoped instanceId.
+// The client-side format is "envName::localId" (configured items) or
+// "envName::::ENVPHYS::::meshName" (environment physics objects); in both cases the
+// env name is the text before the first "::".
+func envNameFromInstanceID(instanceID string) string {
+	if idx := strings.Index(instanceID, "::"); idx >= 0 {
+		return instanceID[:idx]
+	}
+	return ""
+}
+
 // ItemAuthorityClaimRequest mirrors MULTIPLAYER_SYNCH.md §5.6.
 type ItemAuthorityClaimRequest struct {
 	InstanceID     string                  `json:"instanceId"`
@@ -240,22 +251,55 @@ func (ms *MultiplayerServer) broadcastAuthorityReleasesAfterDisconnect(clientID 
 	log.Printf("[ItemAuthority] disconnect released %d items previously owned by %s", len(instanceIDs), clientID)
 }
 
-// pushAuthoritySnapshotToSession replays the current itemOwners map to a single session so
-// late joiners learn ownership without waiting for the next transition (§6.8 bootstrap).
+// pushAuthoritySnapshotToSession replays the current authority state to a single session
+// so late joiners learn ownership without waiting for the next transition (§6.8 bootstrap).
+// It emits two event types:
+//
+//  1. An `item-authority-changed` replay for every entry in itemOwners (§4.7 explicit
+//     per-item ownership).
+//
+//  2. An `env-item-authority-changed` event for every environment that currently has a
+//     registered env-authority (§4.8 environment-item authority). This allows the arriving
+//     client to immediately call seedMotionTypesForEnv and flip items it is not the
+//     env-authority of to ANIMATED, instead of remaining in the ANIMATED-default-with-no-
+//     promotion state until the next live transition arrives.
+//
+// MULTIPLAYER_SYNCH.md §4.5 SSE-open ordering (client contract): this function is called
+// synchronously on SSE open, before client-joined and any item-state-update broadcasts.
 func (ms *MultiplayerServer) pushAuthoritySnapshotToSession(sessionID string) {
 	ms.mu.RLock()
-	entries := make([]map[string]interface{}, 0, len(ms.itemOwners))
 	now := time.Now().UnixMilli()
+
+	// Snapshot itemOwners.
+	itemEntries := make([]map[string]interface{}, 0, len(ms.itemOwners))
 	for id, owner := range ms.itemOwners {
 		if owner == nil || owner.OwnerClientID == "" {
 			continue
 		}
 		cid := owner.OwnerClientID
-		entries = append(entries, itemAuthorityChanged(id, nil, &cid, "claim", now))
+		itemEntries = append(itemEntries, itemAuthorityChanged(id, nil, &cid, "claim", now))
+	}
+
+	// Snapshot envAuthority.
+	envEntries := make([]map[string]interface{}, 0, len(ms.envAuthority))
+	for envName, authClientID := range ms.envAuthority {
+		if envName == "" || authClientID == "" {
+			continue
+		}
+		envEntries = append(envEntries, map[string]interface{}{
+			"envName":         envName,
+			"newAuthorityId":  authClientID,
+			"prevAuthorityId": nil,
+			"reason":          "snapshot",
+			"timestamp":       now,
+		})
 	}
 	ms.mu.RUnlock()
 
-	for _, e := range entries {
+	for _, e := range itemEntries {
 		_ = ms.sendToSession(sessionID, "item-authority-changed", e)
+	}
+	for _, e := range envEntries {
+		_ = ms.sendToSession(sessionID, "env-item-authority-changed", e)
 	}
 }

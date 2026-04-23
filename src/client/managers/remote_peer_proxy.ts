@@ -4,7 +4,6 @@
 
 import { ASSETS } from '../config/assets';
 import { CONFIG } from '../config/game_config';
-
 import { clampCoordComponent } from '../sync/multiplayer_wire_guards';
 import { deserializeQuaternion } from '../utils/multiplayer_serialization';
 

@@ -417,10 +417,16 @@ export class SceneManager {
 
       // Update current environment tracking
       this.currentEnvironment = environmentName;
-      this.environmentLoaded = true;
 
-      // Set up environment items for the new environment
+      // Set up environment items for the new environment BEFORE flipping the loaded flag.
+      // Flipping `environmentLoaded` early let the render-loop's one-shot env-switch seed
+      // race against the async GLB instantiation of configured items (RV Life's presents and
+      // cake are both `collectible`/`physicsInstance` items — the env has no
+      // `physicsObjects`). `seedMotionTypesForEnv()` then ran with an empty
+      // CollectiblesManager map, `lastTrackedEnvironment`/`lastEnvironmentLoaded` latched,
+      // and no later branch re-fired, so items spawned ANIMATED and stayed frozen forever.
       await this.setupEnvironmentItems();
+      this.environmentLoaded = true;
 
       BehaviorManager.registerFallOutOfWorldForEnvironment(environment);
 
@@ -609,7 +615,21 @@ export class SceneManager {
         if (physicsObject.friction !== undefined) {
           options.friction = physicsObject.friction;
         }
-        new BABYLON.PhysicsAggregate(mesh, shapeType, options);
+        const aggregate = new BABYLON.PhysicsAggregate(mesh, shapeType, options);
+
+        // ANIMATED-default-then-promote (MULTIPLAYER_SYNCH.md §6.2 rule 4): env physics
+        // objects like the RV Life cake must spawn kinematic on every client until env
+        // authority is established. `seedMotionTypesForEnv` promotes to DYNAMIC on the
+        // resolved owner. Mass=0 bodies are genuinely static and left untouched.
+        if (physicsObject.mass > 0 && aggregate.body && !aggregate.body.isDisposed) {
+          try {
+            aggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
+            aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
+            aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
+          } catch {
+            /* body still initializing; seedMotionTypesForEnv will retry post-join. */
+          }
+        }
 
         // Apply glow effect if specified
         if (

@@ -44,6 +44,11 @@ type MultiplayerServer struct {
 	itemOwners map[string]*ItemOwner
 	// Idle-timeout threshold (milliseconds) used when arbitrating claims (§4.7 rule 2c).
 	claimIdleTimeoutMs int64
+	// Per-environment authority (§4.8). envAuthority[envName] = clientId of the current
+	// env-authority (first-in-env, FIFO failover). envClientOrder[envName] is the ordered
+	// list of clients currently in that env, used to select the next env-authority on leave.
+	envAuthority    map[string]string   // envName → clientId
+	envClientOrder  map[string][]string // envName → ordered clientIds
 }
 
 // NewMultiplayerServer creates a new multiplayer server
@@ -57,6 +62,8 @@ func NewMultiplayerServer(maxClients int) *MultiplayerServer {
 		lastCharacterStates: make(map[string]interface{}),
 		itemOwners:          make(map[string]*ItemOwner),
 		claimIdleTimeoutMs:  1500,
+		envAuthority:        make(map[string]string),
+		envClientOrder:      make(map[string][]string),
 	}
 }
 
@@ -85,6 +92,7 @@ func (ms *MultiplayerServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/multiplayer/sky-effects-state", ms.handleSkyEffectsStateUpdate)
 	mux.HandleFunc("/api/multiplayer/item-authority-claim", ms.handleItemAuthorityClaim)
 	mux.HandleFunc("/api/multiplayer/item-authority-release", ms.handleItemAuthorityRelease)
+	mux.HandleFunc("/api/multiplayer/env-switch", ms.handleEnvSwitch)
 }
 
 // broadcastToAll sends a signal to all connected clients via Datastar patch-signals SSE.

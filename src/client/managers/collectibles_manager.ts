@@ -36,6 +36,16 @@ export class CollectiblesManager {
     | ((instanceId: string, itemName: string, creditsEarned: number) => void)
     | null = null;
 
+  /**
+   * Fires once all configured items (collectibles + non-collectible physics instances) for
+   * the environment have finished loading into the scene. The multiplayer bootstrap uses
+   * this to re-run `seedMotionTypesForEnv` + `rebuildProximityItems` with a populated items
+   * map, defending against the race where the render-loop's one-shot env-switch seed ran
+   * before async GLB instantiation completed (see scene_manager.ts comment on the
+   * deferred `environmentLoaded` flag).
+   */
+  public static onEnvironmentItemsReady: ((envName: string) => void) | null = null;
+
   // Cached particle systems for efficiency
   private static cachedParticleSystem: BABYLON.ParticleSystem | null = null;
   private static particleSystemPool: BABYLON.ParticleSystem[] = [];
@@ -71,6 +81,14 @@ export class CollectiblesManager {
 
     // Set up collectibles for this environment
     await this.setupCollectiblesForEnvironment(environment);
+
+    if (this.onEnvironmentItemsReady) {
+      try {
+        this.onEnvironmentItemsReady(environment.name);
+      } catch {
+        /* bootstrap hook best-effort; must not break gameplay */
+      }
+    }
   }
 
   /**
@@ -232,6 +250,22 @@ export class CollectiblesManager {
       }
       const physicsAggregate = new BABYLON.PhysicsAggregate(meshInstance, shapeType, options);
 
+      // ANIMATED-default-then-promote (MULTIPLAYER_SYNCH.md §6.2 rule 4): spawn ALL
+      // massful physics items kinematic so no DYNAMIC tick runs before env-authority is
+      // established. `seedMotionTypesForEnv` / the authority-changed handler promotes to
+      // DYNAMIC when this client is resolved as the item's owner (tier 1/2/3). Without
+      // this belt, two clients in the same env can both simulate presents locally before
+      // the env-switch PATCH resolves, producing divergent settled transforms.
+      if (instance.mass > 0 && physicsAggregate.body && !physicsAggregate.body.isDisposed) {
+        try {
+          physicsAggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
+          physicsAggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
+          physicsAggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
+        } catch {
+          /* body still initializing; seedMotionTypesForEnv will retry post-join. */
+        }
+      }
+
       // Store references
       this.collectibles.set(id, meshInstance);
       this.collectibleBodies.set(id, physicsAggregate);
@@ -299,6 +333,18 @@ export class CollectiblesManager {
         options.friction = instance.friction;
       }
       const physicsAggregate = new BABYLON.PhysicsAggregate(meshInstance, shapeType, options);
+
+      // ANIMATED-default-then-promote safety belt: see createCollectibleInstance above for
+      // rationale (MULTIPLAYER_SYNCH.md §6.2 rule 4).
+      if (instance.mass > 0 && physicsAggregate.body && !physicsAggregate.body.isDisposed) {
+        try {
+          physicsAggregate.body.setMotionType(BABYLON.PhysicsMotionType.ANIMATED);
+          physicsAggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
+          physicsAggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
+        } catch {
+          /* body still initializing; seedMotionTypesForEnv will retry post-join. */
+        }
+      }
 
       // Store references for cleanup
       this.physicsItems.set(id, meshInstance);
@@ -608,6 +654,12 @@ export class CollectiblesManager {
    * Idempotent, silent collection path for remote-driven state (non-synchronizer mirror).
    * Mirrors the cleanup half of `collectItem` (dispose body, disable mesh, mark collected)
    * but deliberately skips credits, inventory, effects, and sounds.
+   *
+   * Callers that need the feedback parity required by MULTIPLAYER_SYNCH.md §6.2 rule 1
+   * ("Remote-collect feedback parity") MUST use {@link applyRemoteCollectedWithFeedback}
+   * instead. This silent variant is reserved for reconciliation cases where the mesh is
+   * already gone at call time (e.g. the `isCollected:true` branch of an `updates[]` row
+   * that fires AFTER the canonical `collections[]` burst has already played).
    */
   public static applyRemoteCollected(id: string): void {
     if (this.collectedItems.has(id)) {
@@ -640,6 +692,72 @@ export class CollectiblesManager {
     } catch {
       /* ignore */
     }
+  }
+
+  /**
+   * Remote-driven collection WITH feedback parity (MULTIPLAYER_SYNCH.md §6.2 rule 1
+   * "Remote-collect feedback parity"). Captures the mesh's world position BEFORE
+   * cleanup, then plays the same particle burst and a distance-attenuated
+   * ("spatialized") collect sound that the local collector plays, then invokes the
+   * silent cleanup half.
+   *
+   * Does NOT touch credits, inventory, scoring, analytics, or the `onItemCollected`
+   * callback — those side-effects are the collector's exclusive responsibility.
+   *
+   * If the item has already been marked collected, or no local mesh exists (previous
+   * bootstrap snapshot dispatched it), this is a silent idempotent no-op — there is
+   * no anchor position for the VFX, and the event is purely reconciliation.
+   */
+  public static applyRemoteCollectedWithFeedback(id: string): void {
+    if (this.collectedItems.has(id)) {
+      return;
+    }
+    const mesh = this.collectibles.get(id) ?? this.physicsItems.get(id);
+    if (!mesh) {
+      return;
+    }
+
+    const worldPos = mesh.getAbsolutePosition().clone();
+
+    try {
+      this.showCollectionEffects(worldPos);
+    } catch {
+      /* feedback must not break reconciliation */
+    }
+    try {
+      this.playCollectSoundSpatialized(worldPos);
+    } catch {
+      /* feedback must not break reconciliation */
+    }
+
+    this.applyRemoteCollected(id);
+  }
+
+  /**
+   * Plays `collectionSound` at a volume attenuated by the distance between the
+   * scene's active camera (listener) and the supplied world position. This is the
+   * minimal "spatialized collection sound" required by §6.2 rule 1: the collect
+   * cue for a remote collection becomes quieter the farther the observer is from
+   * the collected item. Attenuation uses a 1 / (1 + d/r) falloff with r = 15 m,
+   * clamped to a minimum floor so distant collections stay audible.
+   */
+  private static playCollectSoundSpatialized(position: BABYLON.Vector3): void {
+    if (!this.collectionSound || !this.scene) {
+      return;
+    }
+    const baseVolume = 0.7;
+    let finalVolume = baseVolume;
+    const cam = this.scene.activeCamera;
+    if (cam) {
+      const listener = cam.globalPosition ?? cam.position;
+      if (listener) {
+        const dist = BABYLON.Vector3.Distance(listener, position);
+        const falloffRadius = 15;
+        const attenuation = 1 / (1 + dist / falloffRadius);
+        finalVolume = Math.max(0.05, Math.min(baseVolume, baseVolume * attenuation));
+      }
+    }
+    this.collectionSound.play({ volume: finalVolume });
   }
 
   /**

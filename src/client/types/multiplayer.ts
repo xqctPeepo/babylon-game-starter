@@ -25,7 +25,8 @@ export interface MultiplayerClientState {
   /** Updated in place when `synchronizer-changed` patch-signals arrive. */
   isSynchronizer: boolean;
   readonly sessionStarted: string; // ISO timestamp
-  readonly environment: string; // Current environment name
+  /** Updated in place when the client walks through a portal and {@link MultiplayerManager.switchEnvironment} propagates the change to the server. */
+  environment: string; // Current environment name
   readonly character: string; // Current character name
 }
 
@@ -304,6 +305,19 @@ export interface ItemAuthorityChangedMessage {
   readonly previousOwnerId: string | null;
   readonly newOwnerId: string | null;
   readonly reason: 'claim' | 'release' | 'disconnect' | 'idle_timeout' | 'env_switch';
+  readonly timestamp: number;
+}
+
+/**
+ * SSE signal payload for `env-item-authority-changed` (§4.8). Broadcast when the env-authority
+ * of an environment changes — on first join, on authority-owner disconnect/failover, and as a
+ * snapshot replay on SSE open (so late joiners learn the current env-authority immediately).
+ */
+export interface EnvItemAuthorityChangedMessage {
+  readonly envName: string;
+  readonly newAuthorityId: string | null;
+  readonly prevAuthorityId: string | null;
+  readonly reason: 'join' | 'disconnect' | 'snapshot' | 'peer-joined';
   readonly timestamp: number;
 }
 

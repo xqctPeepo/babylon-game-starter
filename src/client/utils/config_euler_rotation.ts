@@ -5,9 +5,9 @@
 // Multiplayer and runtime sync use **quaternions only** on the wire.
 // Euler [x,y,z] radians exists here so configs stay human-readable for designers.
 
-import type { QuaternionSerializable, Vector3Serializable } from '../types/multiplayer';
-
 import { deserializeQuaternion, serializeQuaternion } from './multiplayer_serialization';
+
+import type { QuaternionSerializable, Vector3Serializable } from '../types/multiplayer';
 
 /** Config Euler ( Pitch→Yaw→Roll order ) → quaternion for runtime / GLB placement. */
 export function eulerToQuaternion(euler: Vector3Serializable): QuaternionSerializable {

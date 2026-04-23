@@ -141,6 +141,12 @@ export function applyRemoteConfiguredItemState(
   }
 
   if (state.isCollected) {
+    // Silent reconciliation branch. Per MULTIPLAYER_SYNCH.md §6.2 rule 1, the canonical
+    // feedback channel for remote collections is `collections[]` (see
+    // `applyRemoteConfiguredCollections` below, which routes through the feedback variant).
+    // If an `updates[]` row with `isCollected: true` arrives alongside or after that
+    // event, firing feedback again would produce two particle bursts / two sounds. This
+    // branch therefore stays silent.
     if (!CollectiblesManager.isCollectedInstance(parsed.localId)) {
       CollectiblesManager.applyRemoteCollected(parsed.localId);
     }
@@ -168,6 +174,9 @@ export function applyRemoteConfiguredCollections(
     if (CollectiblesManager.isCollectedInstance(parsed.localId)) {
       continue;
     }
-    CollectiblesManager.applyRemoteCollected(parsed.localId);
+    // MULTIPLAYER_SYNCH.md §6.2 rule 1 "Remote-collect feedback parity": observers
+    // play the same particle burst + spatialized collection sound as the collector.
+    // No credits / inventory / scoring side-effects — those stay on the collector.
+    CollectiblesManager.applyRemoteCollectedWithFeedback(parsed.localId);
   }
 }

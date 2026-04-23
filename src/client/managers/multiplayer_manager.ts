@@ -20,6 +20,7 @@ import type {
   SynchronizerChangedMessage,
   ClientConnectionEvent,
   ItemAuthorityChangedMessage,
+  EnvItemAuthorityChangedMessage,
   ItemAuthorityClaim,
   ItemAuthorityClaimResponse,
   ItemAuthorityRelease,
@@ -330,6 +331,81 @@ export class MultiplayerManager {
   }
 
   /**
+   * Notify the server that this client has switched environments. Without this call the
+   * server's `envAuthority` / `envClientOrder` maps only reflect the join-time environment,
+   * so `envAuthority[newEnv]` is never assigned after an in-game portal transition; no
+   * `env-item-authority-changed` broadcast goes out for the new env, no client becomes
+   * env-authority for it, and `item-state-update` is never published for its items. Each
+   * client then simulates physics (e.g. RV Life presents) independently and diverges.
+   *
+   * Behavior (see MULTIPLAYER_SYNCH.md §4.8):
+   *  - Idempotent: a call with the current env resolves immediately with current auth.
+   *  - Errors are logged and swallowed so single-player / offline / server-down paths keep
+   *    working. The caller should always proceed to local `SettingsUI.changeEnvironment`.
+   *  - On success the returned `envAuthority[newEnv]` is applied optimistically via a
+   *    synthetic `env-item-authority-changed` emission, so the local tracker opens its
+   *    publish gate without waiting for the SSE echo round-trip.
+   */
+  public async switchEnvironment(environmentName: string): Promise<void> {
+    const st = this.clientState;
+    if (!st || !this.isConnected) {
+      return;
+    }
+
+    const newEnv = (environmentName ?? '').trim();
+    if (!newEnv) {
+      return;
+    }
+    if (st.environment === newEnv) {
+      return;
+    }
+
+    const origin = this.mpHttpOrigin ?? (await getMultiplayerHttpOrigin());
+    try {
+      const res = await fetch(`${origin}/api/multiplayer/env-switch`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Client-ID': st.clientId
+        },
+        body: JSON.stringify({ environmentName: newEnv })
+      });
+
+      if (!res.ok) {
+        console.warn(
+          `[MultiplayerManager] env-switch failed: ${res.status} ${res.statusText}`
+        );
+        return;
+      }
+
+      const body = (await res.json()) as {
+        ok?: boolean;
+        envAuthority?: Record<string, string | null>;
+        serverTimestamp?: number;
+      };
+
+      st.environment = newEnv;
+
+      // Optimistic apply: synthesize an env-item-authority-changed so listeners
+      // (ItemAuthorityTracker + multiplayer_bootstrap) can unblock the publish gate on the
+      // very next tick instead of waiting for the SSE round-trip.
+      const auth = body.envAuthority?.[newEnv];
+      if (auth !== undefined) {
+        const synthetic: EnvItemAuthorityChangedMessage = {
+          envName: newEnv,
+          newAuthorityId: auth ?? null,
+          prevAuthorityId: null,
+          reason: 'snapshot',
+          timestamp: body.serverTimestamp ?? Date.now()
+        };
+        this.emit('env-item-authority-changed', synthetic);
+      }
+    } catch (error) {
+      console.warn('[MultiplayerManager] env-switch request failed:', error);
+    }
+  }
+
+  /**
    * Sends effects state update (synchronizer only)
    */
   public async updateEffectsState(update: EffectStateUpdate): Promise<void> {
@@ -426,6 +502,7 @@ export class MultiplayerManager {
       | 'sky-effects-state-update'
       | 'synchronizer-changed'
       | 'item-authority-changed'
+      | 'env-item-authority-changed'
       | 'client-joined'
       | 'client-left',
     listener: MultiplayerEmitHandler
@@ -521,7 +598,30 @@ export class MultiplayerManager {
       }
     );
 
-    this.unsubscribers.push(unsub1, unsub2, unsub3, unsub4, unsub5, unsub6, unsub7, unsub8, unsub9);
+    // MULTIPLAYER_SYNCH.md §4.8: `env-item-authority-changed` carries the identity of the
+    // current env-authority for each environment. Without this subscription the signal is
+    // emitted by the server but never reaches listeners, so `ItemAuthorityTracker.envAuthority`
+    // stays empty, `isOwnedBySelf` never resolves tier 2, and every client keeps unclaimed
+    // items in the ANIMATED-default state (breaking the DYNAMIC-only-on-owner invariant).
+    const unsub10 = this.datastarClient.onSignal<EnvItemAuthorityChangedMessage>(
+      'env-item-authority-changed',
+      (data) => {
+        this.emit('env-item-authority-changed', data);
+      }
+    );
+
+    this.unsubscribers.push(
+      unsub1,
+      unsub2,
+      unsub3,
+      unsub4,
+      unsub5,
+      unsub6,
+      unsub7,
+      unsub8,
+      unsub9,
+      unsub10
+    );
 
     // Connect to SSE
     await this.datastarClient.connect();

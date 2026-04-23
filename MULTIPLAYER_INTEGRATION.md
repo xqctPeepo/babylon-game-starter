@@ -321,8 +321,11 @@ func (ms *MultiplayerServer) handleDisconnect(clientId string) {
 // Called for every item-state-update received from the server.
 function applyItemSnapshot(update: ItemStateUpdate): void {
   // 1. Collections first — INDEPENDENT of updates[]. Idempotent.
+  //    Parity rule (§6.2 rule 1 *Remote-collect feedback parity*): if the local
+  //    representation is still present, play the same particles + spatialized
+  //    sound as the local-collect path. Never emit scoring side-effects.
   for (const ev of update.collections ?? []) {
-    collectiblesManager.hideCollectedItem(ev.instanceId);
+    applyRemoteCollectedWithFeedback(ev.instanceId);
   }
 
   // 2. Updates — drop self-owned rows (defense-in-depth); non-owned rows via kinematic target.
@@ -338,8 +341,25 @@ function applyItemSnapshot(update: ItemStateUpdate): void {
   }
 }
 
+// §6.2 rule 1 *Remote-collect feedback parity*. Plays particles + spatialized
+// collect sound at the item's last world position, then performs the silent
+// cleanup half of collection (disable mesh, dispose body, mark collected). No
+// credits, no inventory, no achievement / analytics side-effects.
+function applyRemoteCollectedWithFeedback(instanceId: string): void {
+  if (collectiblesManager.isAlreadyCollected(instanceId)) return;
+  const mesh = collectiblesManager.getMesh(instanceId);
+  if (mesh) {
+    const pos = mesh.getAbsolutePosition().clone();
+    collectiblesManager.showCollectionEffects(pos);
+    collectiblesManager.playCollectSoundAt(pos);
+  }
+  // Silent cleanup (existing applyRemoteCollected path): disables mesh, disposes body, marks collected.
+  collectiblesManager.applyRemoteCollected(instanceId);
+}
+
 function onEnvironmentLoaded(envName: string): void {
-  // 1. Hold all env items kinematic until the bootstrap snapshot is applied.
+  // 1. Hold all env items kinematic until the bootstrap snapshot + authority snapshot are applied.
+  //    (§6.2 rule 4 *ANIMATED-default-then-promote*, §4.8 *No-authority-means-non-owner*.)
   for (const item of itemsInEnv(envName)) {
     CollectiblesManager.setItemKinematic(item.instanceId, true);
   }
@@ -349,20 +369,59 @@ function onEnvironmentLoaded(envName: string): void {
   //    (driven by freshness-matrix AOI-enter on the server side).
   mp.once("item-state-update", (update) => {
     applyItemSnapshot(update);
-    // 4. NOW apply the authoritative motion-type per resolved owner (DYNAMIC vs ANIMATED)
-    //    and resume physics.
+    // 4. Re-derive motion types now that the authority snapshot has been applied
+    //    (§6.2 rule 5 trigger c). Items where self is resolved owner flip to DYNAMIC.
     seedMotionTypesForEnv(envName);
     envPhysicsLoop.resumeFor(envName);
   });
 }
 
+// §6.2 rule 5. Re-derive motion type for every item in env, atomically per-item.
+// Called on env-load bootstrap completion, on authority-snapshot application,
+// and on env-item-authority-changed covering the currently loaded env.
+function seedMotionTypesForEnv(envName: string): void {
+  for (const item of itemsInEnv(envName)) {
+    const ownedBySelf = authorityTracker.isOwnedBySelf(item.instanceId);
+    CollectiblesManager.setItemKinematic(item.instanceId, !ownedBySelf);
+    if (!ownedBySelf) {
+      // Seed kinematic target to current world pose so the body does not drift
+      // between the flip and the first applied updates[] row.
+      const body = collectiblesManager.getPhysicsBody(item.instanceId);
+      const mesh = collectiblesManager.getMesh(item.instanceId);
+      if (body && mesh) {
+        body.setTargetTransform(
+          mesh.getAbsolutePosition(),
+          mesh.absoluteRotationQuaternion,
+        );
+      }
+    }
+  }
+}
+
+// §6.2 rule 5 trigger b. Env-authority transition re-drives motion types for
+// every item in that env whose resolved owner changes as a result. Because
+// env-authority is the default owner for any item with no explicit itemOwners
+// entry, in practice this is every such item.
+function onEnvItemAuthorityChanged(evt: EnvItemAuthorityChanged): void {
+  if (evt.envName !== currentLoadedEnv()) return;
+  seedMotionTypesForEnv(evt.envName);
+}
+
+// §6.2 rule 5 trigger c. Applied exactly once per SSE session on open, then
+// discarded; subsequent authority updates arrive as per-item / per-env signals.
+function onAuthoritySnapshot(snapshot: AuthoritySnapshot): void {
+  authorityTracker.absorb(snapshot); // writes itemOwners + envAuthority maps
+  authorityTracker.markSnapshotApplied(currentLoadedEnv());
+  seedMotionTypesForEnv(currentLoadedEnv());
+}
+
 function applyCollections(events: ItemCollectionEvent[]): void {
   // Standalone; used when a caller has already de-coupled collections[] from updates[].
-  for (const ev of events) collectiblesManager.hideCollectedItem(ev.instanceId);
+  for (const ev of events) applyRemoteCollectedWithFeedback(ev.instanceId);
 }
 ```
 
-The three pseudocode blocks above (AOI lifecycle, orphan reassignment, `applyItemSnapshot`) together implement the server-side freshness matrix and the client-side receiver contract that MULTIPLAYER_SYNCH.md §5.2.2 and §6.2 require.
+The pseudocode blocks above (AOI lifecycle, orphan reassignment, `applyItemSnapshot`, `applyRemoteCollectedWithFeedback`, `seedMotionTypesForEnv`, `onEnvItemAuthorityChanged`, `onAuthoritySnapshot`) together implement the server-side freshness matrix and the client-side receiver contract that MULTIPLAYER_SYNCH.md §5.2.2 and §6.2 require, including the §6.2 rule 1 remote-collect feedback parity and the §6.2 rules 4–5 ANIMATED-default-then-promote motion-type discipline.
 
 ---
 
@@ -952,6 +1011,26 @@ Use `npm run build` and deploy backend following [DEPLOYMENT.md](src/deployment/
 - Check backend is running: `curl http://localhost:5000/api/multiplayer/health`
 - Verify CORS headers if cross-origin
 - Check browser console for detailed errors
+
+### Observer does not see collection burst
+Symptom: P1 collects a present in RV Life. On P1 there is a particle burst and a "pop" sound. On P2 the present simply disappears with no VFX and no audio.
+
+Diagnostic:
+- Verify `applyItemSnapshot` (or the equivalent handler for `item-state-update`) routes each `collections[]` entry through `applyRemoteCollectedWithFeedback(instanceId)` — **not** through the silent `applyRemoteCollected(instanceId)`. The silent variant is reserved for idempotent reconciliation cases where the mesh is already gone; it MUST NOT be on the primary collection path (see MULTIPLAYER_SYNCH.md §6.2 rule 1 *Remote-collect feedback parity*).
+- In `applyRemoteCollectedWithFeedback`, verify the world position is captured from the mesh *before* the mesh is disabled/disposed. If the position is read after cleanup, `getAbsolutePosition()` returns a stale or zeroed vector, anchoring the VFX off-screen.
+- Verify the `isCollected: true` branch of the `updates[]` handler stays silent (no VFX). When both an `updates[]` row with `isCollected: true` and a `collections[]` entry arrive in the same payload, only the `collections[]` path must fire feedback — otherwise the observer gets two bursts.
+- Check that the collection sound is spatialized (`Sound.spatialSound = true` and an emitter attached to the mesh or to a transient `TransformNode` at the stored position). A non-spatial sound is audible but gives misleading proximity cues.
+- If the mesh is already gone when the `collections[]` entry arrives (e.g., previous bootstrap snapshot dispatched it), `applyRemoteCollectedWithFeedback` MUST silently idempotent-merge without feedback — no anchor position, no VFX. This is correct behavior per §6.2 rule 1.
+
+### Item stays DYNAMIC on non-owner
+Symptom: the cake (or any non-collectible physics item) is visibly running local physics on both clients simultaneously. Transforms do not propagate in either direction. Each client's SSE stream shows the client itself is not receiving rows for this `instanceId` (owner-pin drops them as self-echoes on both sides).
+
+Diagnostic:
+- Confirm `ItemAuthorityTracker.isOwnedBySelf(instanceId)` returns `false` by default — i.e., for any item the tracker has not yet observed an explicit authority assignment for (MULTIPLAYER_SYNCH.md §4.8 *No-authority-means-non-owner*). Any ambient "self is owner when no data is present" default produces exactly this failure mode: both clients enter the env, both assume self-ownership, both run DYNAMIC, both drop each other's rows.
+- Verify `seedMotionTypesForEnv(envName)` is invoked on each of the three triggers defined in §6.2 rule 5: (a) `item-authority-changed` for items in that env, (b) `env-item-authority-changed` for that env, (c) authority-snapshot application on SSE open. In particular, trigger (c) is the one that lifts a newcomer out of the ANIMATED-default state into the correct role.
+- Verify the server-side authority snapshot pushed on SSE open (typically `pushAuthoritySnapshotToSession`) includes **both** the `envAuthority` map and the `itemOwners` map for every env that has state. If only `itemOwners` is sent, a newcomer that is waiting-in-FIFO will never learn the current env-authority's identity and can never correctly mark the cake as "someone else's".
+- Verify the `includeRow` publish guard refuses to publish rows for an env whose authority snapshot has not been absorbed yet. Otherwise a racing newcomer can publish cake rows in the window between SSE open and snapshot apply, establishing a false claim on the server side.
+- Capture a 10-second SSE window for the non-owning client. The stream MUST contain `updates[]` rows for the cake at the sample rate defined by the item's send cadence. If zero rows arrive, the server-side owner resolution is wrong; if rows arrive but the body does not move, the client is erroneously dropping them as self-echoes (check `isOwnedBySelf`).
 
 ### SSE events delayed by seconds (Brotli / proxy buffering)
 Symptom: character or item updates arrive in bursts every few seconds rather than continuously; chat or authority signals lag noticeably behind the wall clock.

@@ -74,9 +74,9 @@ export function normalizeQuaternion(q: QuaternionSerializable): QuaternionSerial
  * Prefer `rotationQuaternion`; if absent, converts Babylon’s internal Euler (`rotation`) once — **not** the wire format (multiplayer payloads are **only** quaternions; Euler belongs in asset/config only).
  */
 export function meshRotationToWireQuaternion(mesh: BABYLON.AbstractMesh): QuaternionSerializable {
-  const q = mesh.rotationQuaternion
-    ? mesh.rotationQuaternion
-    : BABYLON.Quaternion.FromEulerAngles(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z);
+  const q =
+    mesh.rotationQuaternion ??
+    BABYLON.Quaternion.FromEulerAngles(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z);
   return normalizeQuaternion(serializeQuaternion(q));
 }
 

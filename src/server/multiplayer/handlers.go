@@ -81,9 +81,40 @@ func (ms *MultiplayerServer) handleJoin(w http.ResponseWriter, r *http.Request) 
 		ms.setSynchronizerID(clientID)
 	}
 
+	// Per-environment authority (§4.8): first client in each env becomes the env-authority.
+	// envClientOrder[envName] preserves join order for FIFO failover on leave.
+	envName := strings.TrimSpace(req.EnvironmentName)
+	var becameEnvAuthority bool
+	if envName != "" {
+		ms.envClientOrder[envName] = append(ms.envClientOrder[envName], clientID)
+		if len(ms.envClientOrder[envName]) == 1 {
+			ms.envAuthority[envName] = clientID
+			becameEnvAuthority = true
+		}
+	}
+
 	existingClients := len(ms.clients) - 1 // Exclude self
 
 	ms.mu.Unlock()
+
+	// Emit env-item-authority-changed so every connected client (including the new arrival
+	// whose SSE is not yet open) can learn the current env-authority. The new arrival's own
+	// client will receive this via pushAuthoritySnapshotToSession on SSE open; other clients
+	// in the env need to know so they can demote themselves if they were acting as env-authority
+	// before this client joined (the FIFO rule means the earlier client stays authority, but the
+	// new one needs to know who is authoritative). On first-join (becameEnvAuthority=true) we
+	// broadcast to all so any peer in the same env can learn the identity.
+	if becameEnvAuthority {
+		now := time.Now().UnixMilli()
+		ms.broadcastToAll("env-item-authority-changed", map[string]interface{}{
+			"envName":         envName,
+			"newAuthorityId":  clientID,
+			"prevAuthorityId": nil,
+			"reason":          "join",
+			"timestamp":       now,
+		})
+		log.Printf("[EnvAuthority] %s became env-authority for '%s'", clientID, envName)
+	}
 
 	log.Printf(
 		"[Join] Client %s joined (Env: %s, Char: %s, Sync: %v, Total: %d)",
@@ -190,9 +221,11 @@ func (ms *MultiplayerServer) handleCharacterStateUpdate(w http.ResponseWriter, r
 // itemOwners map:
 //
 //   - If the instance is currently owned and sender == owner: accept (refresh LastUpdatedAt).
-//   - If the instance is unowned and sender is the base synchronizer: accept (bootstrap /
-//     collectible transforms).
+//   - If the instance is unowned: accept from the env-authority of that item's environment
+//     (§4.8 — envAuthority[envName]) or, as a global fallback, the base synchronizer (§4.6).
 //   - Otherwise: silently drop the row.
+//
+// The environment name is extracted from the env-scoped instanceId prefix (format: "envName::…").
 //
 // ItemCollectionEvents are first-write-wins. Any row's claim of `isCollected=true` is
 // persisted into lastItemState so late joiners get the latest view.
@@ -244,12 +277,20 @@ func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *htt
 			cur, exists := ms.itemOwners[iid]
 			accept := false
 			if exists && cur != nil {
+				// Explicit owner row: only the owner may publish.
 				if cur.OwnerClientID == sender {
 					cur.LastUpdatedAt = now
 					accept = true
 				}
 			} else {
-				if sender == syncID && syncID != "" {
+				// Unowned row: accept from env-authority (primary) or global
+				// base-synchronizer (fallback for envs where no env-authority is
+				// tracked, or legacy clients). Both paths are per §4.8 / §4.6.
+				envName := envNameFromInstanceID(iid)
+				envAuth := ms.envAuthority[envName]
+				if envAuth != "" && sender == envAuth {
+					accept = true
+				} else if sender == syncID && syncID != "" {
 					accept = true
 				}
 			}
@@ -424,11 +465,19 @@ func (ms *MultiplayerServer) verifyCharacterPoseSender(r *http.Request, payload 
 
 // removeClient removes a client from the server
 func (ms *MultiplayerServer) removeClient(clientID string) {
+	type envFailover struct {
+		envName        string
+		newAuthorityId string
+		prevAuthId     string
+	}
+
 	var (
 		wasSynchronizer bool
 		remaining       int
 		newSyncID       string
 		shouldPromote   bool
+		envFailovers    []envFailover
+		clientEnvName   string
 	)
 
 	ms.mu.Lock()
@@ -439,6 +488,7 @@ func (ms *MultiplayerServer) removeClient(clientID string) {
 	}
 
 	wasSynchronizer = client.IsSynchronizer
+	clientEnvName = strings.TrimSpace(client.EnvironmentName)
 	delete(ms.clients, clientID)
 	delete(ms.lastCharacterStates, clientID)
 	for i, id := range ms.clientOrder {
@@ -462,9 +512,36 @@ func (ms *MultiplayerServer) removeClient(clientID string) {
 	} else if wasSynchronizer {
 		ms.setSynchronizerID("")
 	}
+
+	// Per-environment authority failover (§4.8). Remove the leaving client from the
+	// per-env order list and, if it was the env-authority, promote the next in line.
+	if clientEnvName != "" {
+		order := ms.envClientOrder[clientEnvName]
+		for i, id := range order {
+			if id == clientID {
+				ms.envClientOrder[clientEnvName] = append(order[:i], order[i+1:]...)
+				break
+			}
+		}
+		remaining_in_env := len(ms.envClientOrder[clientEnvName])
+		if remaining_in_env == 0 {
+			delete(ms.envClientOrder, clientEnvName)
+			delete(ms.envAuthority, clientEnvName)
+		} else if ms.envAuthority[clientEnvName] == clientID {
+			// Promote next client in arrival order.
+			newAuth := ms.envClientOrder[clientEnvName][0]
+			ms.envAuthority[clientEnvName] = newAuth
+			envFailovers = append(envFailovers, envFailover{
+				envName:        clientEnvName,
+				newAuthorityId: newAuth,
+				prevAuthId:     clientID,
+			})
+		}
+	}
+
 	ms.mu.Unlock()
 
-	log.Printf("[Leave] Client %s disconnected (WasSynchronizer: %v)", clientID, wasSynchronizer)
+	log.Printf("[Leave] Client %s disconnected (WasSynchronizer: %v, Env: %s)", clientID, wasSynchronizer, clientEnvName)
 
 	ms.broadcastAuthorityReleasesAfterDisconnect(clientID, releasedItems)
 
@@ -474,6 +551,18 @@ func (ms *MultiplayerServer) removeClient(clientID string) {
 			"newSynchronizerId": newSyncID,
 			"reason":            "disconnection",
 			"timestamp":         time.Now().UnixMilli(),
+		})
+	}
+
+	// Broadcast env-authority changes so all peers can re-derive motion types (§6.2 rule 5b).
+	for _, fo := range envFailovers {
+		log.Printf("[EnvAuthority] Failover in '%s': %s → %s", fo.envName, fo.prevAuthId, fo.newAuthorityId)
+		ms.broadcastToAll("env-item-authority-changed", map[string]interface{}{
+			"envName":         fo.envName,
+			"newAuthorityId":  fo.newAuthorityId,
+			"prevAuthorityId": fo.prevAuthId,
+			"reason":          "disconnect",
+			"timestamp":       time.Now().UnixMilli(),
 		})
 	}
 
@@ -601,4 +690,197 @@ func (ms *MultiplayerServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	<-sse.Context().Done()
+}
+
+// EnvSwitchRequest is the JSON body for PATCH /api/multiplayer/env-switch.
+type EnvSwitchRequest struct {
+	EnvironmentName string `json:"environmentName"`
+}
+
+// EnvSwitchResponse echoes the new env and the current env-authority for it. The client
+// uses `envAuthority[newEnv]` to optimistically update its ItemAuthorityTracker before the
+// SSE echo of `env-item-authority-changed` arrives (MULTIPLAYER_SYNCH.md §4.8).
+type EnvSwitchResponse struct {
+	OK              bool              `json:"ok"`
+	EnvAuthority    map[string]string `json:"envAuthority"`
+	ServerTimestamp int64             `json:"serverTimestamp"`
+}
+
+// handleEnvSwitch processes client-driven environment changes so the server's
+// `envAuthority` / `envClientOrder` maps stay in sync with the actual env each client
+// occupies. Without this, `handleJoin`-time env assignments become stale the moment a
+// client walks through an in-game portal (the prior break: envAuthority never set for the
+// new env → no env-item-authority-changed broadcast → all clients stuck in
+// ANIMATED-default-with-no-publisher, presents simulate independently per client).
+//
+// Flow (MULTIPLAYER_SYNCH.md §4.8 env-authority lifecycle):
+//
+//  1. Remove clientID from envClientOrder[oldEnv]. If it was envAuthority[oldEnv], promote
+//     the FIFO head (if any) or clear envAuthority[oldEnv] outright.
+//
+//  2. Append clientID to envClientOrder[newEnv]. If it is now the only entry, set
+//     envAuthority[newEnv] = clientID. Otherwise leave the prior authority in place.
+//
+//  3. Emit env-item-authority-changed broadcasts for any transitions (old or new env).
+//     Also send a targeted snapshot to the switcher for newEnv so it learns the current
+//     authority when joining an env whose authority did not transition.
+func (ms *MultiplayerServer) handleEnvSwitch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	clientID := strings.TrimSpace(r.Header.Get("X-Client-ID"))
+	if clientID == "" {
+		http.Error(w, "Missing X-Client-ID", http.StatusUnauthorized)
+		return
+	}
+
+	var req EnvSwitchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+	newEnv := strings.TrimSpace(req.EnvironmentName)
+	if newEnv == "" {
+		http.Error(w, "Missing environmentName", http.StatusBadRequest)
+		return
+	}
+
+	type envTransition struct {
+		envName         string
+		newAuthorityID  string // "" encodes null (no authority)
+		prevAuthorityID string // "" encodes null (no prior authority)
+		reason          string
+	}
+
+	var (
+		transitions    []envTransition
+		sessionID      string
+		newEnvAuthID   string
+		oldEnv         string
+	)
+
+	ms.mu.Lock()
+	client, exists := ms.clients[clientID]
+	if !exists {
+		ms.mu.Unlock()
+		http.Error(w, "Unknown client", http.StatusUnauthorized)
+		return
+	}
+
+	sessionID = client.SessionID
+	oldEnv = strings.TrimSpace(client.EnvironmentName)
+
+	if oldEnv == newEnv {
+		newEnvAuthID = ms.envAuthority[newEnv]
+		ms.mu.Unlock()
+		// No-op transition; still respond with current authority so the client can apply.
+		resp := EnvSwitchResponse{
+			OK:              true,
+			EnvAuthority:    map[string]string{newEnv: newEnvAuthID},
+			ServerTimestamp: time.Now().UnixMilli(),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// 1. Remove from old env.
+	if oldEnv != "" {
+		order := ms.envClientOrder[oldEnv]
+		for i, id := range order {
+			if id == clientID {
+				ms.envClientOrder[oldEnv] = append(order[:i], order[i+1:]...)
+				break
+			}
+		}
+		remaining := len(ms.envClientOrder[oldEnv])
+		if remaining == 0 {
+			delete(ms.envClientOrder, oldEnv)
+			if ms.envAuthority[oldEnv] == clientID {
+				delete(ms.envAuthority, oldEnv)
+				transitions = append(transitions, envTransition{
+					envName:         oldEnv,
+					newAuthorityID:  "",
+					prevAuthorityID: clientID,
+					reason:          "disconnect",
+				})
+			} else if _, had := ms.envAuthority[oldEnv]; had {
+				// Defensive: if the authority was someone else (shouldn't happen when the
+				// client was in envClientOrder) leave it alone.
+			}
+		} else if ms.envAuthority[oldEnv] == clientID {
+			next := ms.envClientOrder[oldEnv][0]
+			ms.envAuthority[oldEnv] = next
+			transitions = append(transitions, envTransition{
+				envName:         oldEnv,
+				newAuthorityID:  next,
+				prevAuthorityID: clientID,
+				reason:          "disconnect",
+			})
+		}
+	}
+
+	// 2. Add to new env.
+	ms.envClientOrder[newEnv] = append(ms.envClientOrder[newEnv], clientID)
+	if len(ms.envClientOrder[newEnv]) == 1 {
+		ms.envAuthority[newEnv] = clientID
+		transitions = append(transitions, envTransition{
+			envName:         newEnv,
+			newAuthorityID:  clientID,
+			prevAuthorityID: "",
+			reason:          "join",
+		})
+	}
+	newEnvAuthID = ms.envAuthority[newEnv]
+
+	// 3. Update client's record.
+	client.EnvironmentName = newEnv
+
+	ms.mu.Unlock()
+
+	log.Printf("[EnvSwitch] %s moved %q -> %q (newAuth=%s)", clientID, oldEnv, newEnv, newEnvAuthID)
+
+	now := time.Now().UnixMilli()
+	for _, t := range transitions {
+		payload := map[string]interface{}{
+			"envName":   t.envName,
+			"reason":    t.reason,
+			"timestamp": now,
+		}
+		if t.newAuthorityID == "" {
+			payload["newAuthorityId"] = nil
+		} else {
+			payload["newAuthorityId"] = t.newAuthorityID
+		}
+		if t.prevAuthorityID == "" {
+			payload["prevAuthorityId"] = nil
+		} else {
+			payload["prevAuthorityId"] = t.prevAuthorityID
+		}
+		ms.broadcastToAll("env-item-authority-changed", payload)
+	}
+
+	// Targeted snapshot for the switcher so it learns the current auth even when it did not
+	// transition (joining a non-empty env whose authority was unchanged).
+	if newEnvAuthID != "" {
+		_ = ms.sendToSession(sessionID, "env-item-authority-changed", map[string]interface{}{
+			"envName":         newEnv,
+			"newAuthorityId":  newEnvAuthID,
+			"prevAuthorityId": nil,
+			"reason":          "snapshot",
+			"timestamp":       now,
+		})
+	}
+
+	resp := EnvSwitchResponse{
+		OK:              true,
+		EnvAuthority:    map[string]string{newEnv: newEnvAuthID},
+		ServerTimestamp: now,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }

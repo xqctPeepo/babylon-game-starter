@@ -134,7 +134,7 @@ export class AnimationController {
 
     if (
       this.currentAnimation === targetAnimation.name &&
-      targetAnimation.isPlaying === true
+      targetAnimation.isPlaying
     ) {
       return;
     }

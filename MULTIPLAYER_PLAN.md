@@ -436,6 +436,20 @@ The resolved owner's local physics simulation is the canonical, authoritative so
 
 Transitions are driven exclusively by `item-authority-changed`, `env-item-authority-changed`, and env-switch signals. On every transition, the client MUST atomically set the motion type and clear any queued kinematic target before running the next physics tick on `I`.
 
+**ANIMATED-default-then-promote ([MULTIPLAYER_SYNCH.md §6.2](MULTIPLAYER_SYNCH.md#62-item-state-update) rule 4 / [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle) *No-authority-means-non-owner*).* On env entry, the client seeds every `I ∈ E` to `ANIMATED` and MUST NOT promote to `DYNAMIC` until it has applied an explicit authority signal that names self as resolved owner. The bug this prevents — "cake runs DYNAMIC on both clients, no transforms propagate" — arises whenever two clients simultaneously resolve self-ownership for the same instance: each client's receiver then drops the other client's `updates[]` rows as self-echoes per §6.2 rule 2, and both bodies run independent local simulations. By making *the absence of an authority signal* equivalent to *non-owner*, we eliminate the optimistic-claim pathway at its source. The authoritative assignment always lands via one of three channels, in descending specificity: (a) an `item-authority-changed` claiming the item, (b) an `env-item-authority-changed` naming self as `envAuthority[E]` while the item has no explicit owner, or (c) the authority snapshot delivered on SSE open that resolves both registries at once.
+
+**Motion-type re-evaluation triggers ([§6.2](MULTIPLAYER_SYNCH.md#62-item-state-update) rule 5).** The motion type for every `I` in the currently loaded env is re-derived from the authority tracker on each of the following events, atomically per-item and before the next physics tick:
+
+1. `item-authority-changed` for `I` — re-evaluate `I` alone.
+2. `env-item-authority-changed` for the currently loaded env — re-evaluate every `I` in that env whose resolved owner transitions as a result. Because env-authority is the default owner for any `I` lacking an explicit `itemOwners[I]`, this in practice means every such `I` in the env.
+3. Authority-snapshot application on SSE open — re-evaluate every `I` in the currently loaded env. This is the trigger that lifts a newcomer out of the ANIMATED-default state into its correct role: items for which the snapshot reveals self as resolved owner flip to `DYNAMIC`; all others stay `ANIMATED`.
+
+The atomic per-item flip MUST also seed the body's kinematic target to its current world transform when transitioning into non-owner, so the body does not drift between the flip and the first applied `updates[]` row.
+
+### Remote collection feedback parity
+
+Remote collection events carry visual-and-audio parity with local collection ([MULTIPLAYER_SYNCH.md §6.2](MULTIPLAYER_SYNCH.md#62-item-state-update) rule 1 *Remote-collect feedback parity*): when P2 receives a `collections[]` entry for an item still present in P2's scene, P2 plays the same particle burst and spatialized collection sound that P1 played locally — anchored to the item's last-known world position before the mesh is disabled. P2 does **not** credit any currency, update any inventory, or emit any scoring side-effect; those remain exclusively the collector's. If P2 has already dispatched the item via a prior bootstrap snapshot or earlier reconciliation, P2 silently idempotent-merges without feedback: there is no mesh to anchor the VFX to, and the event is purely reconciliation.
+
 ### Environment bootstrap ordering
 
 On environment entry, the client MUST apply the following sequence **before starting its local physics loop** in the entered environment:
