@@ -14,7 +14,8 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"eslint.config.js\" \"vite.config.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "preview": "vite preview",
-    "export:playground": "node scripts/generate-playground-json.mjs",
+    "export:playground": "node scripts/generate-playground-json.mjs && node scripts/check-playground-export.mjs",
+    "check:playground": "node scripts/check-playground-export.mjs",
     "deploy:prepare": "node src/deployment/scripts/prepare-deployment.mjs"
   },
   "dependencies": {

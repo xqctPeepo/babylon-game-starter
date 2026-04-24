@@ -10,6 +10,8 @@
 - [File layout](#file-layout)
 - [Configuration](#configuration)
 - [Running it locally](#running-it-locally)
+- [Running in the Babylon playground](#running-in-the-babylon-playground)
+- [Data compression in the stack](#data-compression-in-the-stack)
 - [How the client is wired](#how-the-client-is-wired)
 - [Receiver rules (mandatory four)](#receiver-rules-mandatory-four)
 - [Two-player item-sync flow](#two-player-item-sync-flow)
@@ -150,6 +152,7 @@ The server reads these environment variables:
 | -------- | ------- | ------- |
 | `PORT` | `5000` | Listen port |
 | `MULTIPLAYER_SSE_COMPRESSION` | `brotli` | `brotli`, `gzip`, or `off` (last resort for proxy debugging) |
+| `MULTIPLAYER_CORS_ALLOW_ORIGIN` | *(unset)* | Pin `Access-Control-Allow-Origin` to a single origin (e.g. `https://mygame.pages.dev`). When unset the server **echoes the request `Origin`**, which lets students hit the API from `https://playground.babylonjs.com` and from forks deployed anywhere. Pin it only if you specifically need to lock browsers out; the default already covers cross-origin playground use. |
 
 ## Running it locally
 
@@ -170,6 +173,118 @@ npm run dev
 ```
 
 With `VITE_MULTIPLAYER_HOST` unset, the client talks to the server through Vite's proxy (same-origin `/api/multiplayer/*`) — see [`vite.config.ts`](vite.config.ts).
+
+## Running in the Babylon playground
+
+The exported `playground.json` is a self-contained copy of the client that students can paste into <https://playground.babylonjs.com/> and run — including the multiplayer stack. This is the fastest on-ramp for a classroom: no `npm install`, no local server, no build step.
+
+> [!TIP]
+> When in doubt, re-run `npm run export:playground` on the host repo before distributing. That script regenerates the snippet **and** runs [`scripts/check-playground-export.mjs`](scripts/check-playground-export.mjs), which walks every relative import and fails if the manifest is missing a file.
+
+> [!NOTE]
+> If you're **editing** code that ships to the playground (as opposed to running the snippet), read [`PLAYGROUND.md`](PLAYGROUND.md) first. It documents the two non-obvious constraints the Babylon playground imposes on bundled TypeScript — the ambient `BABYLON` global (never `import * as BABYLON from '@babylonjs/core'` in bundled files) and the static-imports-only rule — both of which the export smoke checker enforces.
+
+### Step-by-step (student-facing)
+
+1. Export the snippet from this repo: `npm run export:playground`.
+2. Open the copy at `src/client/public/playground.json` (or the twin at `src/client/playground/playground.json`) and copy its entire contents.
+3. Open <https://playground.babylonjs.com/> in a modern desktop browser.
+4. In the playground's top bar, use **Scene → Load** (or paste directly into the editor via **Scene → Paste** — UI labels occasionally change; any "load JSON" path works). Paste the file contents.
+5. In the top-right plugin menu, toggle on **Add WASM plugin → Havok**. This is required — `index.ts` assumes `HavokPhysics` has already been registered by the host, which is how `main.ts` handles it under Vite and how the playground toggle handles it here. Without this, physics bodies fail to construct and the scene will error out early.
+6. Click **Run**. The default behavior connects to the shared classroom server at `bgs-mp.onrender.com` (see `CONFIG.MULTIPLAYER.PRODUCTION_SERVER`).
+
+### Cold-start caveat
+
+The shared default runs on Render's free tier, which sleeps after ~15 minutes of idle. A cold first connection can take 10–30 seconds. The client raises a `multiplayer-warming-up` custom event on `window` after 5 s of waiting so the UI can show a friendly hint, and `CONFIG.MULTIPLAYER.CONNECTION_TIMEOUT_MS` is set to 30 s to cover all observed cold starts. Students should expect a brief pause the first time the class wakes the server each day.
+
+### Pointing the class at an instructor-hosted server
+
+Two zero-code routes to override the default host, in priority order:
+
+1. **URL query override.** Append `?mp=host[:port]` or `#mp=host[:port]` to the playground URL. Example:
+
+   ```text
+   https://playground.babylonjs.com/#mp=your-server.example.com
+   ```
+
+   `datastar_client.ts` reads the override first, normalizes off the scheme (it is assumed to match the playground's scheme — HTTPS in practice), runs a health probe, and only connects if the probe succeeds. If the probe fails a clear error is surfaced in the console; the client does **not** silently fall back to the shared default, because in a classroom that would mean a misconfigured class silently lands on the wrong server.
+2. **Edit the constant.** Before running `npm run export:playground`, edit `CONFIG.MULTIPLAYER.PRODUCTION_SERVER` in [`src/client/config/game_config.ts`](src/client/config/game_config.ts). Use this for a permanent class deployment.
+
+> [!IMPORTANT]
+> An instructor-hosted server must accept cross-origin requests from `https://playground.babylonjs.com`. The default `MULTIPLAYER_CORS_ALLOW_ORIGIN` behavior (echoes the request `Origin`) already does this. If you pin the variable, **include** `https://playground.babylonjs.com` in your allowed origins, or students will see `CORS blocked` in the browser console and no data will flow. See also [`src/server/multiplayer/cors.go`](src/server/multiplayer/cors.go).
+
+### Verification checklist
+
+Use this as a classroom-ready smoke test right after pasting:
+
+- [ ] Page loads and Havok is active (no `HavokPhysics is not defined` in console).
+- [ ] Browser console shows `[Datastar] Checking server at <host>...` and, within a few seconds or up to ~30 s on a cold start, `[Datastar] ✓ Server available at <host>`.
+- [ ] If a cold start is in progress, console shows the warming-up notice.
+- [ ] `GET /api/multiplayer/stream` in the Network tab has `Content-Encoding: br` (or `gzip`) and no `Content-Length`.
+- [ ] Open a second playground tab in the same env; each tab sees the other's character move. Both tabs converge on the same inventory / scoreboard state.
+
+> [!NOTE]
+> The shared default server is best-effort. It is adequate for classroom demos but is **not** suitable for graded assessments or large cohorts. For either of those, stand up a per-class server (see [`RENDER_DEPLOYMENT.md`](RENDER_DEPLOYMENT.md)) and use the `?mp=` override.
+
+## Data compression in the stack
+
+Students frequently ask "why is this fast when multiplayer games are supposed to be hard?" The honest answer is that several independent layers of data reduction stack multiplicatively. Each layer has a cost/benefit crossover point worth understanding, because the right answer changes if your game ships 30 items per tick versus 3000.
+
+### Where compression happens
+
+```mermaid
+flowchart LR
+  owner["Owner client<br/>mesh pose"] --> poseCompress["(1) Pose-only<br/>wire shape"]
+  poseCompress --> patch["HTTP PATCH<br/>/item-state"]
+  patch --> dirtyFilter["(2) Server<br/>dirty filter"]
+  dirtyFilter --> broadcast["SSE broadcast"]
+  broadcast --> brotli["(3) Brotli / gzip<br/>content encoding"]
+  brotli --> receiver["Receiver client<br/>decoded stream"]
+```
+
+#### 1. Pose-only wire shape (Invariant P)
+
+Every item row carries `{ pos: [3 floats], rot: [4 floats] }` — 7 numbers — rather than a full 4×4 world matrix (16 numbers). The 4×4 matrix was the earlier design; the rationale for the switch is documented exhaustively in [`MULTIPLAYER_SYNCH.md §B.11`](MULTIPLAYER_SYNCH.md#b11-why-the-wire-ships-pos--rot-and-not-a-world-matrix).
+
+- **Ratio**: ~16:7, i.e. **~2.3×** smaller per row (a ~55 % drop). Payload shape is JSON so the actual byte shrink is a little smaller than the float count suggests — roughly 180 B matrix rows become roughly 80 B pose rows after JSON escaping.
+- **Cost**: zero extra CPU on both ends — the owner was already computing its mesh pose; the receiver was going to write it onto a mesh regardless.
+- **Crossover**: always on. There is no scenario where a full matrix wins — it loses to scale-decomposition bugs *and* to bandwidth.
+
+#### 2. Server-side dirty filter (`isDirtyRow`)
+
+Every incoming row is compared against a cached copy of the previous broadcast (`itemTransformCache`); rows whose position moved less than `posEpsilon` **and** whose rotation quaternion moved less than a quaternion-dot tolerance are dropped before fan-out. See [`src/server/multiplayer/handlers.go`](src/server/multiplayer/handlers.go) `isDirtyRow` and [`MULTIPLAYER_SYNCH.md §5.2.1`](MULTIPLAYER_SYNCH.md#521-global-dirty-filter-server-side-transform-cache).
+
+- **Ratio**: entirely scene-dependent. When every item is asleep, **every** row is dropped — so bandwidth per unmoved item is essentially zero. During active play in a typical scene most items are stationary at any given tick, so observed ratios sit around **5–20×** reduction in broadcast volume versus a naive "echo every row" server.
+- **Cost**: one `sqrt` of a squared-distance (or two vector subtracts + one dot product) per accepted row. Measured on a mid-range laptop at ~0.2 µs per row; fully negligible next to JSON serialization.
+- **Crossover**: always on. The only way this loses is if every single item moves every single tick, in which case it is a net no-op (cost = 0 rows saved × ~0 µs), never a loss.
+
+#### 3. HTTP content encoding (Brotli, gzip, or off)
+
+SSE responses on `/api/multiplayer/stream` pass through [`src/server/multiplayer/compression.go`](src/server/multiplayer/compression.go). Controlled by `MULTIPLAYER_SSE_COMPRESSION` (default `brotli`, with `gzip` fallback for clients that don't advertise `br`). Brotli runs at **quality 4** with **LGWin 18** (256 KiB window), tuned so the encoder flushes promptly after every event rather than buffering several events together — flush preservation is the part that makes this safe for SSE.
+
+- **Ratio on our payloads**: SSE event streams are *extremely* compressible — the event names (`character-state-update`, `item-state-update`, `item-authority-changed`, …) and JSON field names repeat on every event, which is exactly what Brotli's static dictionary and sliding window exploit.
+  - **Brotli q4** on our traffic: typically **6–12×** smaller. Small payloads (single-character update) see the low end; busy ticks with many items and repeated field names push toward the high end.
+  - **gzip level 4** on the same traffic: typically **3–5×**.
+  - Rule of thumb: Brotli roughly doubles the compression ratio of gzip on JSON-ish SSE, for almost the same CPU budget at low qualities.
+- **Cost** (the interesting one):
+  - **Encoder** (server, per event): q4 costs roughly **0.2–0.5 ms of CPU per KB** of input. Decoding in the browser is **~5–10× faster** than encoding, i.e. sub-100 µs per event for anything we broadcast.
+  - **Memory**: LGWin 18 = 256 KiB per open SSE stream. For a classroom of 30 concurrent students that is ~8 MiB resident on the server. Fine on Render's free tier (512 MiB).
+  - **Latency**: the flush-preservation setup adds at most one additional `Flush()` per event (low microseconds). It does **not** batch events together — that was the main thing we had to prove before turning it on.
+- **Crossover** (when is Brotli not worth it?):
+  - **Payload size**: the middleware uses `MinSize = 256` bytes, so individual PATCH ACKs and tiny `character-state` rows are sent uncompressed. Below ~200 bytes the Brotli frame overhead eats most of the savings.
+  - **CPU-bound server**: if you ever see `br` encoding dominate the server flamegraph (unlikely at a classroom scale, possible at thousands of concurrent clients), step down to `MULTIPLAYER_SSE_COMPRESSION=gzip`. You trade ~2× worse ratio for roughly half the encoder CPU.
+  - **Bad proxy**: some intermediate proxies (older nginx configurations, some corporate proxies) buffer the response body before forwarding, which makes compression invisible and hurts per-event latency. The escape hatch is `MULTIPLAYER_SSE_COMPRESSION=off`; see the troubleshooting entry for *SSE events arrive in bursts every few seconds*.
+
+### Stacking: what students see on the wire
+
+Multiply the three layers through a realistic example. Suppose your scene has 50 dynamic items, each publishing a 10 Hz update, across 4 clients:
+
+- **Naive**: 50 items × 10 Hz × 180 B × 4 recipients × 2 directions ≈ **720 KB/s** aggregate.
+- **Pose-only** (×0.44): ≈ 320 KB/s.
+- **Plus dirty filter** (×0.1 in a mostly-idle scene, ×0.3 in a busy one): **32–100 KB/s**.
+- **Plus Brotli q4** (×0.12): **4–12 KB/s**.
+
+That is a **~60–180× reduction** over the naive baseline from three independent, orthogonal layers — each of which is also cheap. The teachable insight for students is that you do not need any one clever trick; you need several modest ones that compose.
 
 ## How the client is wired
 

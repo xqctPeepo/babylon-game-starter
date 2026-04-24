@@ -304,11 +304,18 @@ export const CONFIG: GameConfig = {
 
   // Multiplayer: forks can point the client at their own Go server without editing this block
   // by setting VITE_MULTIPLAYER_HOST in .env / .env.local (see repo .env.example).
+  // Students running the exported playground snippet can override at runtime via
+  // `?mp=host` or `#mp=host` on the playground URL (see MULTIPLAYER.md).
   MULTIPLAYER: {
     ENABLED: true,
     PRODUCTION_SERVER: 'bgs-mp.onrender.com',
     LOCAL_SERVER: 'localhost:5000',
-    CONNECTION_TIMEOUT_MS: 15000,
+    // Render free-tier services sleep after ~15 min idle and take 10-30 s to
+    // wake. The first probe after a cold start can easily exceed 15 s on
+    // slow home connections. 30 s covers all observed cases so far, while
+    // `multiplayer-warming-up` fires on `window` at 5 s so the UI can explain
+    // the delay. See datastar_client.ts for the event contract.
+    CONNECTION_TIMEOUT_MS: 30000,
     PRODUCTION_FIRST: true,
     /**
      * Per-item authority tunables (MULTIPLAYER_SYNCH.md §4.7).

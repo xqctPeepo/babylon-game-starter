@@ -14,7 +14,18 @@
  *
  * The Datastar way: server-sent `datastar-patch-signals` events (JSON from the Go SDK
  * `MarshalAndPatchSignals` patch-signals wire format). This client uses `EventSource` and dispatches by signal name.
+ *
+ * NOTE FOR PLAYGROUND CONTRIBUTORS:
+ * This module is bundled into `playground.json` and executed inside the Babylon
+ * playground's blob-URL ESM loader. Use STATIC imports only — dynamic relative
+ * imports are rewritten into unquoted bare tokens that V8 rejects with
+ * `SyntaxError: Unexpected token ','`. See `PLAYGROUND.md`
+ * ("Static imports only, no dynamic relative `import()`") for the full
+ * rationale. The `scripts/check-playground-export.mjs` smoke test fails the
+ * build if a dynamic relative import slips back in.
  */
+
+import { CONFIG } from '../config/game_config';
 
 export type DatastarSignalListener<T = unknown> = (data: T) => void;
 
@@ -62,7 +73,6 @@ export class DatastarClient {
    * Connects to the Datastar server via SSE with timeout
    */
   public async connect(timeoutMs?: number): Promise<void> {
-    const { CONFIG } = await import('../config/game_config');
     const effectiveMs = timeoutMs ?? CONFIG.MULTIPLAYER.CONNECTION_TIMEOUT_MS;
 
     return new Promise((resolve, reject) => {
@@ -393,16 +403,97 @@ function normalizeMultiplayerHostInput(raw: string): string {
   return s.trim();
 }
 
-async function determineMultiplayerUrl(): Promise<string> {
-  // Late import to avoid circular dependency issues
-  const { CONFIG } = await import('../config/game_config');
+/**
+ * Shape of `import.meta.env` under Vite. Neither field is guaranteed to exist
+ * outside a Vite build (the Babylon playground, Jest, a manual `tsc` run, etc.),
+ * so every access goes through this typed cast with optional chaining.
+ */
+interface ImportMetaViteEnv {
+  readonly env?: {
+    readonly DEV?: boolean;
+    readonly VITE_MULTIPLAYER_HOST?: string;
+  };
+}
 
+function readViteEnv(): ImportMetaViteEnv['env'] | undefined {
+  try {
+    return (import.meta as unknown as ImportMetaViteEnv).env;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read an optional host override from the URL, as `?mp=host[:port]` or
+ * `#mp=host[:port]`. This is the preferred knob for students running the
+ * exported snippet in https://playground.babylonjs.com/ and for instructors
+ * directing a class at a private server without rebuilding the bundle.
+ *
+ * Returns the normalized host (no scheme, no path), or an empty string when
+ * the override is absent, malformed, or we are not in a browser.
+ */
+function readOverrideHost(): string {
+  if (typeof window === 'undefined' || typeof window.location === 'undefined') {
+    return '';
+  }
+  try {
+    const url = new URL(window.location.href);
+    const fromQuery = url.searchParams.get('mp');
+    if (fromQuery && fromQuery.trim().length > 0) {
+      return normalizeMultiplayerHostInput(fromQuery);
+    }
+    // Babylon playground rewrites the query string frequently; also accept
+    // the override in the fragment (#mp=host) so a pasted URL survives
+    // playground navigation.
+    const hash = url.hash.startsWith('#') ? url.hash.slice(1) : url.hash;
+    if (hash) {
+      const params = new URLSearchParams(hash);
+      const fromHash = params.get('mp');
+      if (fromHash && fromHash.trim().length > 0) {
+        return normalizeMultiplayerHostInput(fromHash);
+      }
+    }
+  } catch {
+    // Ignore malformed URLs; callers fall through to env / config defaults.
+  }
+  return '';
+}
+
+/**
+ * Decide the SSE endpoint to use. Checked in priority order:
+ *
+ *   1. `?mp=host` (or `#mp=host`) URL override — highest priority so
+ *      instructors can steer a class without rebuilding.
+ *   2. `VITE_MULTIPLAYER_HOST` build-time env — only ever set under Vite.
+ *   3. Vite dev same-origin via the dev-server proxy.
+ *   4. `CONFIG.MULTIPLAYER.PRODUCTION_SERVER` / `LOCAL_SERVER` probe in the
+ *      order dictated by `PRODUCTION_FIRST`.
+ *
+ * Every `import.meta.env.*` read goes through `readViteEnv()` so this module
+ * remains safe to run inside the Babylon playground where `import.meta.env`
+ * is not injected.
+ */
+async function determineMultiplayerUrl(): Promise<string> {
   if (!CONFIG.MULTIPLAYER.ENABLED) {
     throw new Error('Multiplayer is disabled in configuration');
   }
 
   const timeoutMs = CONFIG.MULTIPLAYER.CONNECTION_TIMEOUT_MS;
-  const envRaw = import.meta.env.VITE_MULTIPLAYER_HOST;
+  const viteEnv = readViteEnv();
+
+  const overrideHost = readOverrideHost();
+  if (overrideHost) {
+    console.log(`[Datastar] Using ?mp= override host "${overrideHost}"`);
+    const only = await attemptServerConnection(overrideHost, timeoutMs);
+    if (only) {
+      return only;
+    }
+    throw new Error(
+      `Multiplayer override "?mp=${overrideHost}" failed its health check. Fix the host or remove the override to use the default server.`
+    );
+  }
+
+  const envRaw = viteEnv?.VITE_MULTIPLAYER_HOST;
   const envHost =
     typeof envRaw === 'string' && envRaw.trim().length > 0
       ? normalizeMultiplayerHostInput(envRaw)
@@ -419,7 +510,7 @@ async function determineMultiplayerUrl(): Promise<string> {
   }
 
   // `npm run dev`: same-origin requests hit the Vite proxy → Go on :5000 (no remote probe, no CORS).
-  if (import.meta.env.DEV && typeof window !== 'undefined') {
+  if (viteEnv?.DEV === true && typeof window !== 'undefined') {
     return `${window.location.origin}/api/multiplayer/stream`;
   }
 
@@ -446,10 +537,36 @@ async function determineMultiplayerUrl(): Promise<string> {
 }
 
 /**
- * Attempts to connect to a server and returns the SSE URL if successful
+ * Emitted on `window` when a health probe is taking longer than ~5 s, which on
+ * a free-tier Render deployment usually means the service is cold-starting.
+ * The event is purely advisory; listeners can show a "warming up server…"
+ * hint while the probe continues up to `CONNECTION_TIMEOUT_MS`.
+ */
+const WARMING_UP_EVENT = 'multiplayer-warming-up';
+const WARMING_UP_THRESHOLD_MS = 5000;
+
+/**
+ * Attempts to connect to a server and returns the SSE URL if successful.
+ * Fires `multiplayer-warming-up` on `window` if the probe exceeds
+ * `WARMING_UP_THRESHOLD_MS`, so the UI can explain a long first connect.
  */
 async function attemptServerConnection(server: string, timeoutMs: number): Promise<string | null> {
   const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+
+  const warmingUpTimer = setTimeout(() => {
+    try {
+      window.dispatchEvent(
+        new CustomEvent(WARMING_UP_EVENT, {
+          detail: { server, timeoutMs, elapsedMs: WARMING_UP_THRESHOLD_MS }
+        })
+      );
+    } catch {
+      // CustomEvent / dispatchEvent unavailable (non-browser shim); skip silently.
+    }
+    console.log(
+      `[Datastar] Server at ${server} is slow to respond; this is normal for a cold Render free-tier instance (may take up to ${Math.round(timeoutMs / 1000)}s).`
+    );
+  }, WARMING_UP_THRESHOLD_MS);
 
   try {
     console.log(`[Datastar] Checking server at ${server}...`);
@@ -475,6 +592,8 @@ async function attemptServerConnection(server: string, timeoutMs: number): Promi
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.log(`[Datastar] Server at ${server} unavailable (${errorMsg})`);
+  } finally {
+    clearTimeout(warmingUpTimer);
   }
 
   return null;
@@ -486,8 +605,9 @@ async function attemptServerConnection(server: string, timeoutMs: number): Promi
  */
 export function getDatastarClient(): DatastarClient {
   if (!globalDatastarClient) {
+    const viteEnv = readViteEnv();
     const initialStream =
-      import.meta.env.DEV && typeof window !== 'undefined'
+      viteEnv?.DEV === true && typeof window !== 'undefined'
         ? `${window.location.origin}/api/multiplayer/stream`
         : 'http://127.0.0.1:5000/api/multiplayer/stream';
     globalDatastarClient = new DatastarClient(initialStream);

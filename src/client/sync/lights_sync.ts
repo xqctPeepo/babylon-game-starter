@@ -1,8 +1,13 @@
 // ============================================================================
 // LIGHTS STATE SYNC MODULE
 // ============================================================================
-
-import * as BABYLON from '@babylonjs/core';
+//
+// NOTE FOR PLAYGROUND CONTRIBUTORS:
+// Do not add `import * as BABYLON from '@babylonjs/core'` to this file (or to
+// any file under `exportRoots` in `scripts/generate-playground-json.mjs`).
+// `BABYLON` is an ambient global throughout this project — see `PLAYGROUND.md`
+// ("The ambient `BABYLON` global: never `import * as BABYLON`") for the full
+// rationale. The smoke checker rejects that import in bundled files.
 
 import { ThrottledFunction } from '../utils/multiplayer_serialization';
 

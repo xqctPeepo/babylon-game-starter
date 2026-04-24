@@ -159,12 +159,21 @@ The production `Dockerfile` copies a static **`multiplayer-server`** binary into
 ```typescript
 MULTIPLAYER: {
   ENABLED: true,
-  PRODUCTION_SERVER: 'bgs-mp.onrender.com',  // ✅ Your Render deployment
+  PRODUCTION_SERVER: 'bgs-mp.onrender.com',   // Your Render deployment
   LOCAL_SERVER: 'localhost:5000',             // Dev fallback
-  CONNECTION_TIMEOUT_MS: 15000,               // 15s for cold starts
+  CONNECTION_TIMEOUT_MS: 30000,               // 30 s covers Render free-tier cold starts
   PRODUCTION_FIRST: true                      // Try production first
 }
 ```
+
+### Cross-origin access (important for classroom / playground use)
+
+The Go server applies `withCORS` (see [`src/server/multiplayer/cors.go`](src/server/multiplayer/cors.go)) to every route. Two deployment modes:
+
+- **Unpinned (recommended for classrooms).** Leave `MULTIPLAYER_CORS_ALLOW_ORIGIN` **unset**. The server echoes the request `Origin`, so the API accepts browsers on any page — including `https://playground.babylonjs.com` when students paste the exported snippet.
+- **Pinned.** Set `MULTIPLAYER_CORS_ALLOW_ORIGIN=https://your-host.example.com` to lock the API down to a single front-end origin. Students pasting into the Babylon playground will then see `CORS blocked` in the browser console unless you add `https://playground.babylonjs.com` to the allowed list (the server currently supports a single origin in the env var; for multi-origin support, edit `cors.go`).
+
+Classroom guidance: do not pin this variable unless you have a specific security reason. The default echo-origin behavior is both playground-friendly and compatible with fork deploys without any extra plumbing.
 
 ### Client Connection Flow
 

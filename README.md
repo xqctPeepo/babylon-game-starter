@@ -23,7 +23,7 @@ Babylon Game Starter provides a complete, ready-to-run foundation for building i
 - **Behavior system** — Proximity triggers, fall-out-of-world respawn, glow, `adjustCredits`, and environment `portal` actions
 - **HUD** — Device-adaptive layout (desktop / mobile / iPad + keyboard) from `game_config.ts`
 - **Mobile controls** — Virtual joystick, jump, and boost
-- **Playground export** — `npm run export:playground` produces `playground.json` for the web editor
+- **Playground export** — `npm run export:playground` produces `playground.json` for the Babylon.js web editor, **including multiplayer**. The export is smoke-checked by `scripts/check-playground-export.mjs` before it is written. See [*Running in the Babylon playground*](MULTIPLAYER.md#running-in-the-babylon-playground) for the classroom walkthrough, including the `?mp=host` runtime override.
 
 ---
 
@@ -69,7 +69,8 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 | `npm run lint`              | ESLint (runs in CI)                                                           |
 | `npm run lint:fix`          | ESLint with `--fix`                                                           |
 | `npm run typecheck`         | `tsc --noEmit` for app and Node configs (runs in CI)                        |
-| `npm run export:playground` | Generate `playground.json` for the Babylon.js editor                        |
+| `npm run export:playground` | Generate `playground.json` for the Babylon.js editor and smoke-check it     |
+| `npm run check:playground`  | Re-run the export smoke check standalone (walks every import from the entry)|
 | `npm run deploy:prepare`    | Validate deployment settings and scaffold host artifacts / `src/server/*`   |
 
 CI (`.github/workflows/typecheck.yml`) runs **`format:check` → `lint` → `typecheck`**.
@@ -111,6 +112,7 @@ eslint.config.js
 - **[USERS_GUIDE.md](USERS_GUIDE.md)** — Architecture, configuration, behaviors, fall respawn, condensed narrative notes
 - **[MULTIPLAYER.md](MULTIPLAYER.md)** — Multiplayer onboarding, configuration, testing, and troubleshooting
 - **[MULTIPLAYER_SYNCH.md](MULTIPLAYER_SYNCH.md)** — Normative wire contract, authority rules, and item-sync spec
+- **[PLAYGROUND.md](PLAYGROUND.md)** — Contributor guide for code that ships inside `playground.json` (ambient `BABYLON` global, static-imports-only rule, smoke-checker guardrails, export pipeline)
 - **[SERIALIZATION_GUIDE.md](SERIALIZATION_GUIDE.md)** — State serialization, deserialization, and mesh application
 - **[SERIALIZATION_QUICK_REF.md](SERIALIZATION_QUICK_REF.md)** — Cheat-sheet for the serialization helpers
 - **[src/deployment/DEPLOYMENT.md](src/deployment/DEPLOYMENT.md)** — Settings-driven deploy, Docker, host artifacts

@@ -1,6 +1,15 @@
 // ============================================================================
 // BabylonJS PLAYGROUND V2 - MULTIFILE ENTRY POINT
 // ============================================================================
+//
+// This file is the entry used by both the Vite dev build (via `main.ts`) and
+// the exported `playground.json` snippet. When running inside
+// https://playground.babylonjs.com/ the student MUST enable the Havok WASM
+// plugin via the playground's top-right "Add WASM plugin" menu. Multiplayer
+// targets the default shared server (`CONFIG.MULTIPLAYER.PRODUCTION_SERVER`);
+// append `?mp=host[:port]` or `#mp=host[:port]` to the playground URL to
+// point at an instructor-hosted server instead. See MULTIPLAYER.md for the
+// full classroom walkthrough.
 
 // /// <reference path="./types/babylon.d.ts" />
 
