@@ -3,7 +3,7 @@
 **Date:** April 20, 2026  
 **Status:** ✅ **COMPLETE & PRODUCTION READY**
 
-> **Item transform wire migrated to matrix-only (Invariants M/E).** As of the matrix-only wire migration, `ItemInstanceState` on the wire carries exactly one transform field: `matrix` (row-major 4x4 world matrix, 16 floats). The `position` / `rotation` / `velocity` / Euler helpers described below remain in use for **character sync**; item sync uses `sampleWorldMatrix(mesh)` and `applyMatrixToBody(body, matrix)` in `multiplayer_serialization.ts`. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state).
+> **Item transform wire migrated to pose-only (Invariants P/E).** The wire format underwent two migrations: first from separate `position` / `rotation` fields to a unified `matrix` (row-major 4x4), and then — after the negative-scale decomposition trap surfaced ([MULTIPLAYER_SYNCH.md §B.11](MULTIPLAYER_SYNCH.md#b11-why-the-wire-ships-pos--rot-and-not-a-world-matrix)) — to the current pose-only format. `ItemInstanceState` on the wire now carries exactly two transform fields: `pos: [x,y,z]` (world-space position, 3 floats) and `rot: [x,y,z,w]` (unit quaternion, 4 floats). Scale is never replicated — every client spawns the mesh with identical local `scaling` from config. The Euler / quaternion helpers described below remain in use for **character sync**; item sync uses `sampleMeshPose(mesh)` and `applyPoseToMesh(mesh, pose)` in `multiplayer_serialization.ts`. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state).
 
 ---
 
@@ -241,7 +241,7 @@ SERIALIZATION_GUIDE.md (862 lines)
 
 ✅ **All serialization paths are complete and validated**
 - Characters: Position, rotation, velocity, animation, boost
-- Items: 4x4 world matrix (Invariant M — 16 floats, row-major), collection status
+- Items: pose pair `{ pos: [3], rot: [4] }` (Invariant P — 7 floats total; scale never on the wire), collection status
 - Lights: Intensity, color, position, direction, type-specific props
 - Effects: Position, active status
 - Sky: Effect type, intensity, duration

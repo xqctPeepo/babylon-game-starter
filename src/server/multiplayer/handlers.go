@@ -108,10 +108,10 @@ func (ms *MultiplayerServer) handleJoin(w http.ResponseWriter, r *http.Request) 
 	if becameEnvAuthority {
 		now := time.Now().UnixMilli()
 		ms.broadcastToAll("env-item-authority-changed", map[string]interface{}{
-			"envName":         envName,
+			"environmentName": envName,
 			"newAuthorityId":  clientID,
 			"prevAuthorityId": nil,
-			"reason":          "join",
+			"reason":          "arrival", // §6.9: first arrival into empty env
 			"timestamp":       now,
 		})
 		log.Printf("[EnvAuthority] %s became env-authority for '%s'", clientID, envName)
@@ -217,27 +217,49 @@ func (ms *MultiplayerServer) handleCharacterStateUpdate(w http.ResponseWriter, r
 	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
-// Invariants M (matrix-only wire) and E (no Euler anywhere on item paths) —
-// see MULTIPLAYER_SYNCH.md §5.2. Every `ItemInstanceState` row carries exactly one
-// transform field, `matrix`, a JSON array of length 16 (row-major 4x4 world matrix).
-// Legacy per-component fields (`position`, `rotation`, `velocity`) are rejected/stripped.
-const itemMatrixLen = 16
+// Invariants P (pose-only wire) and E (no Euler anywhere on item paths) —
+// see MULTIPLAYER_SYNCH.md §5.2. Every `ItemInstanceState` row carries exactly two
+// transform fields: `pos` (JSON array of length 3) and `rot` (JSON array of length
+// 4; unit quaternion [x,y,z,w]). Legacy fields (`matrix`, `position`, `rotation`,
+// `velocity`) are rejected/stripped.
+const itemPosLen = 3
+const itemRotLen = 4
 
-// matrixDirty is the element-wise epsilon comparator for the 16-float item matrix
-// field. Populated here so the typed dirty-filter cache — when it is added — can
-// use the same single-tolerance rule described in MULTIPLAYER_INTEGRATION.md.
-const itemMatrixEpsilon = 1e-4
+// itemPosEpsilon is the per-component tolerance (meters) for the pos field used by
+// the dirty filter (MULTIPLAYER_SYNCH.md §5.2.1).
+//
+// Value rationale: the threshold MUST exceed the Havok idle-jitter amplitude of a
+// settled body on the owner client. Empirically, ~5 mm is comfortably above Havok's
+// settled-body jitter for our scale range while remaining well below the
+// player-character collision radius (so real motion remains perceptible on replicas).
+const itemPosEpsilon = 5e-3
 
-// coerceItemMatrix validates a row's `matrix` field. On success it returns the
-// canonical slice (length 16, all finite). On failure it returns nil; callers MUST
-// drop the row.
-func coerceItemMatrix(row map[string]interface{}) []float64 {
-	raw, ok := row["matrix"].([]interface{})
-	if !ok || len(raw) != itemMatrixLen {
+// itemRotDotThreshold is the dirty-filter threshold on the quaternion dot product.
+// Two unit quaternions represent the same orientation iff |q1·q2| ≈ 1; the angle
+// between them satisfies cos(θ/2) = |q1·q2|. A dot-product below this threshold
+// corresponds to roughly a ≥0.5° orientation change, which matches the translational
+// jitter floor (itemPosEpsilon ≈ 5 mm) in visual significance.
+//
+// Using |dot| handles the double-cover property: q and -q represent the same rotation
+// and must compare as equal.
+const itemRotDotThreshold = 0.99996 // ≈ cos(0.5°)
+
+// coerceItemPose validates a row's `pos` and `rot` fields. On success it returns
+// canonical slices (pos length 3, rot length 4, all finite). On failure it returns
+// nil slices; callers MUST drop the row unless isCollected=true.
+func coerceItemPose(row map[string]interface{}) ([]float64, []float64) {
+	pos := coerceFloatSlice(row["pos"], itemPosLen)
+	rot := coerceFloatSlice(row["rot"], itemRotLen)
+	return pos, rot
+}
+
+func coerceFloatSlice(raw interface{}, n int) []float64 {
+	arr, ok := raw.([]interface{})
+	if !ok || len(arr) != n {
 		return nil
 	}
-	out := make([]float64, itemMatrixLen)
-	for i, v := range raw {
+	out := make([]float64, n)
+	for i, v := range arr {
 		f, ok := v.(float64)
 		if !ok {
 			return nil
@@ -250,31 +272,133 @@ func coerceItemMatrix(row map[string]interface{}) []float64 {
 	return out
 }
 
-// stripLegacyItemTransformFields removes any per-component transform keys that
-// may arrive from legacy clients (Invariants M and E). The server refuses to
-// propagate them even if present in the incoming row.
+// stripLegacyItemTransformFields removes any legacy transform keys that may arrive
+// from older clients (Invariants P and E). The server refuses to propagate them
+// even if present in the incoming row.
 func stripLegacyItemTransformFields(row map[string]interface{}) {
+	delete(row, "matrix")
 	delete(row, "position")
 	delete(row, "rotation")
 	delete(row, "velocity")
 }
 
+// isPosDirty returns true when any component of position a differs from b by more
+// than itemPosEpsilon. Both slices must have length itemPosLen.
+func isPosDirty(a, b []float64) bool {
+	for i := 0; i < itemPosLen; i++ {
+		if math.Abs(a[i]-b[i]) > itemPosEpsilon {
+			return true
+		}
+	}
+	return false
+}
+
+// isRotDirty returns true when the quaternion dot-product magnitude is below
+// itemRotDotThreshold (i.e. the rotation has changed by more than ~0.5°). Both
+// slices must have length itemRotLen and be approximately unit length.
+func isRotDirty(a, b []float64) bool {
+	dot := a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
+	if dot < 0 {
+		dot = -dot
+	}
+	return dot < itemRotDotThreshold
+}
+
+// isDirtyRow compares an accepted item row against the cached transform to decide whether
+// the row carries new information worth broadcasting (MULTIPLAYER_SYNCH.md §5.2.1).
+//
+// A row is DIRTY when any of the following hold:
+//   - No cache entry exists (first accepted row for this instanceId).
+//   - The pos differs component-wise beyond itemPosEpsilon.
+//   - The rot quaternion differs (|dot| below itemRotDotThreshold).
+//   - Any categorical field (isCollected, collectedByClientId, ownerClientId) changed.
+//
+// Callers must hold ms.mu (write lock).
+func (ms *MultiplayerServer) isDirtyRow(
+	iid string,
+	pos, rot []float64,
+	isCollected bool,
+	collectedBy string,
+	ownerID string,
+) bool {
+	cached, ok := ms.itemTransformCache[iid]
+	if !ok {
+		return true // first row — always dirty
+	}
+	if isCollected != cached.IsCollected {
+		return true
+	}
+	if collectedBy != cached.CollectedByClientID {
+		return true
+	}
+	if ownerID != cached.OwnerClientID {
+		return true
+	}
+	if pos != nil && isPosDirty(pos, cached.Pos[:]) {
+		return true
+	}
+	if rot != nil && isRotDirty(rot, cached.Rot[:]) {
+		return true
+	}
+	return false
+}
+
+// updateTransformCache writes the latest accepted row values into itemTransformCache.
+// Callers must hold ms.mu (write lock).
+func (ms *MultiplayerServer) updateTransformCache(
+	iid string,
+	itemName string,
+	pos, rot []float64,
+	isCollected bool,
+	collectedBy string,
+	ownerID string,
+	now int64,
+) {
+	entry := CachedItemTransform{
+		IsCollected:         isCollected,
+		CollectedByClientID: collectedBy,
+		OwnerClientID:       ownerID,
+		LastBroadcastAt:     now,
+	}
+	// Preserve itemName from the first row that sets it; never overwrite with empty.
+	if itemName != "" {
+		entry.ItemName = itemName
+	} else if existing, ok := ms.itemTransformCache[iid]; ok {
+		entry.ItemName = existing.ItemName
+	}
+	// Preserve last-known pose for collection-only rows (isCollected=true, no pose).
+	if pos != nil {
+		copy(entry.Pos[:], pos)
+	} else if existing, ok := ms.itemTransformCache[iid]; ok {
+		entry.Pos = existing.Pos
+	}
+	if rot != nil {
+		copy(entry.Rot[:], rot)
+	} else if existing, ok := ms.itemTransformCache[iid]; ok {
+		entry.Rot = existing.Rot
+	}
+	ms.itemTransformCache[iid] = entry
+}
+
 // handleItemStateUpdate processes item state updates under the hybrid authority model
 // (MULTIPLAYER_SYNCH.md §5.2 / §7.5). Rows are filtered per-instance against the server's
-// itemOwners map:
+// itemOwners and envAuthority maps:
 //
-//   - If the instance is currently owned and sender == owner: accept (refresh LastUpdatedAt).
-//   - If the instance is unowned: accept from the env-authority of that item's environment
-//     (§4.8 — envAuthority[envName]) or, as a global fallback, the base synchronizer (§4.6).
+//   - Explicit owner row (itemOwners[iid] exists, sender == owner): accept, refresh LastUpdatedAt.
+//   - Unowned row: accept from env-authority (§4.8) or base-synchronizer fallback (§4.6).
 //   - Otherwise: silently drop the row.
 //
-// The environment name is extracted from the env-scoped instanceId prefix (format: "envName::…").
+// After authority filtering, accepted rows pass through the dirty filter (§5.2.1): rows
+// whose pose (pos + rot) and categorical fields are within epsilon of the cached values
+// are dropped from the broadcast (but still refresh activity tracking). Only DIRTY rows
+// are broadcast.
 //
-// Invariant M: rows without a valid 16-float `matrix` are dropped; per-component transform
-// fields (`position`/`rotation`/`velocity`) are stripped before broadcast.
+// Broadcast uses broadcastExcept(senderSessionID) so the resolved owner never receives its
+// own rows back (owner-pin invariant, §5.2.2 rule 2).
 //
-// ItemCollectionEvents are first-write-wins. Any row's claim of `isCollected=true` is
-// persisted into lastItemState so late joiners get the latest view.
+// Invariant P: rows without a valid `pos` (len 3) AND `rot` (len 4) are dropped unless
+// isCollected=true. Invariant E: legacy transform fields (matrix/position/rotation/velocity)
+// are stripped before broadcast.
 func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -288,7 +412,11 @@ func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *htt
 	}
 
 	ms.mu.RLock()
-	_, known := ms.clients[sender]
+	clientInfo, known := ms.clients[sender]
+	var senderSessionID string
+	if clientInfo != nil {
+		senderSessionID = clientInfo.SessionID
+	}
 	syncID := ms.synchronizerID
 	ms.mu.RUnlock()
 	if !known {
@@ -304,7 +432,8 @@ func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *htt
 
 	now := time.Now().UnixMilli()
 
-	filteredUpdates := make([]interface{}, 0)
+	// dirtyUpdates holds rows that passed both authority AND dirty filters — these go to peers.
+	dirtyUpdates := make([]interface{}, 0)
 	droppedRows := 0
 
 	if rawUpdates, ok := update["updates"].([]interface{}); ok {
@@ -320,38 +449,48 @@ func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *htt
 				continue
 			}
 
-			// Invariant M: every row MUST carry a matrix of length 16. Rows
-			// that are collection-only (isCollected toggling without transform)
-			// are permitted to omit matrix ONLY when isCollected is true — the
-			// receiver hides the mesh and no transform is needed.
-			if mat := coerceItemMatrix(row); mat == nil {
+			// Invariant P: every row MUST carry a valid `pos` (len 3) AND `rot`
+			// (len 4). Collection-only rows (isCollected toggling without transform)
+			// are permitted to omit both ONLY when isCollected is true — the receiver
+			// hides the mesh and no transform is needed.
+			pos, rot := coerceItemPose(row)
+			if pos == nil || rot == nil {
 				if collected, _ := row["isCollected"].(bool); !collected {
 					droppedRows++
 					continue
 				}
+				// Don't mix partial pose into a collection-only row.
+				pos = nil
+				rot = nil
 			}
-			// Invariant E: never forward per-component transform fields even if
-			// a legacy client sent them alongside `matrix`.
+			// Invariant E: never forward legacy transform fields even if a legacy
+			// client sent them alongside `pos`/`rot`.
 			stripLegacyItemTransformFields(row)
 
+			// --- Authority filter (§7.5) ---
 			cur, exists := ms.itemOwners[iid]
 			accept := false
+			var resolvedOwnerID string // the clientId that the server resolves as owner
+
 			if exists && cur != nil {
-				// Explicit owner row: only the owner may publish.
+				// Tier 1: explicit owner row — only the owner may publish.
 				if cur.OwnerClientID == sender {
 					cur.LastUpdatedAt = now
 					accept = true
+					resolvedOwnerID = sender
 				}
 			} else {
-				// Unowned row: accept from env-authority (primary) or global
-				// base-synchronizer (fallback for envs where no env-authority is
-				// tracked, or legacy clients). Both paths are per §4.8 / §4.6.
+				// Tier 2: unowned row — accept from env-authority (primary) or
+				// base-synchronizer (fallback for envs without an env-authority).
 				envName := envNameFromInstanceID(iid)
 				envAuth := ms.envAuthority[envName]
 				if envAuth != "" && sender == envAuth {
 					accept = true
-				} else if sender == syncID && syncID != "" {
+					resolvedOwnerID = envAuth
+				} else if sender == syncID && syncID != "" && envAuth == "" {
+					// Base-synchronizer fallback only when no env-authority is set.
 					accept = true
+					resolvedOwnerID = syncID
 				}
 			}
 
@@ -360,37 +499,51 @@ func (ms *MultiplayerServer) handleItemStateUpdate(w http.ResponseWriter, r *htt
 				continue
 			}
 
-			if o, ok := ms.itemOwners[iid]; ok && o != nil {
-				row["ownerClientId"] = o.OwnerClientID
-			} else if _, present := row["ownerClientId"]; !present {
-				row["ownerClientId"] = nil
+			// Stamp ownerClientId so the client's first defense-in-depth check
+			// (ownerClientId === selfId) fires for both explicit and env-authority rows.
+			row["ownerClientId"] = resolvedOwnerID
+
+			// --- Dirty filter (§5.2.1) ---
+			isCollected, _ := row["isCollected"].(bool)
+			collectedBy, _ := row["collectedByClientId"].(string)
+			itemName, _ := row["itemName"].(string) // preserved in cache for bootstrap reconstruction
+
+			dirty := ms.isDirtyRow(iid, pos, rot, isCollected, collectedBy, resolvedOwnerID)
+
+			// Always refresh activity tracking regardless of dirty status (§5.2.1 Activity side effects).
+			if o, ok := ms.itemOwners[iid]; ok && o != nil && o.OwnerClientID == sender {
+				o.LastUpdatedAt = now
 			}
 
-			filteredUpdates = append(filteredUpdates, row)
+			if dirty {
+				ms.updateTransformCache(iid, itemName, pos, rot, isCollected, collectedBy, resolvedOwnerID, now)
+				dirtyUpdates = append(dirtyUpdates, row)
+				if pos != nil {
+					log.Printf("[ItemState] Accepted dirty row %s pos=(%.2f,%.2f,%.2f) owner=%s", iid, pos[0], pos[1], pos[2], resolvedOwnerID)
+				}
+			}
+			// CLEAN rows: activity already refreshed above; skip broadcast.
 		}
 		ms.mu.Unlock()
 	}
 
 	collections := update["collections"]
 
-	broadcast := map[string]interface{}{
-		"updates":   filteredUpdates,
-		"timestamp": update["timestamp"],
-	}
-	if collections != nil {
-		broadcast["collections"] = collections
-	}
-
-	ms.mu.Lock()
-	ms.lastItemState = broadcast
-	ms.mu.Unlock()
-
 	if droppedRows > 0 {
 		log.Printf("[ItemState] Filtered %d unauthorized row(s) from sender=%s", droppedRows, sender)
 	}
 
-	if len(filteredUpdates) > 0 || collections != nil {
-		ms.broadcastToAll("item-state-update", broadcast)
+	if len(dirtyUpdates) > 0 || collections != nil {
+		broadcast := map[string]interface{}{
+			"updates":   dirtyUpdates,
+			"timestamp": update["timestamp"],
+		}
+		if collections != nil {
+			broadcast["collections"] = collections
+		}
+		// Owner-pin invariant (§5.2.2 rule 2): do NOT send item rows back to their sender.
+		// broadcastExcept ensures the resolved owner receives no echo of its own transforms.
+		ms.broadcastExcept(senderSessionID, "item-state-update", broadcast)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -615,10 +768,12 @@ func (ms *MultiplayerServer) removeClient(clientID string) {
 	}
 
 	// Broadcast env-authority changes so all peers can re-derive motion types (§6.2 rule 5b).
+	// reason "disconnect" is the correct §6.9 token for tab-close / network-drop events
+	// (same semantics as "failover"; distinguished for diagnostics).
 	for _, fo := range envFailovers {
 		log.Printf("[EnvAuthority] Failover in '%s': %s → %s", fo.envName, fo.prevAuthId, fo.newAuthorityId)
 		ms.broadcastToAll("env-item-authority-changed", map[string]interface{}{
-			"envName":         fo.envName,
+			"environmentName": fo.envName,
 			"newAuthorityId":  fo.newAuthorityId,
 			"prevAuthorityId": fo.prevAuthId,
 			"reason":          "disconnect",
@@ -658,9 +813,42 @@ func (ms *MultiplayerServer) mergeCharacterSnapshot(update map[string]interface{
 }
 
 // pushSnapshotToSession sends the latest item/world and character poses to one new SSE session.
+//
+// Item bootstrap uses itemTransformCache (§5.2.1 / §5.2.3 *Bootstrap on environment entry*):
+// one ItemInstanceState row is emitted per cached instanceId so the late joiner always
+// receives the full item set, not just the last partial PATCH. This replaces the former
+// single lastItemState blob which could be a partial update in multi-owner scenarios.
 func (ms *MultiplayerServer) pushSnapshotToSession(sessionID string) {
 	ms.mu.RLock()
-	itemSnap := ms.lastItemState
+
+	// Build bootstrap rows from itemTransformCache — one row per known instanceId.
+	itemRows := make([]interface{}, 0, len(ms.itemTransformCache))
+	for iid, cached := range ms.itemTransformCache {
+		posIface := make([]interface{}, itemPosLen)
+		for i, v := range cached.Pos {
+			posIface[i] = v
+		}
+		rotIface := make([]interface{}, itemRotLen)
+		for i, v := range cached.Rot {
+			rotIface[i] = v
+		}
+		row := map[string]interface{}{
+			"instanceId":  iid,
+			"itemName":    cached.ItemName, // required by client-side coerceItemInstanceState
+			"pos":         posIface,
+			"rot":         rotIface,
+			"isCollected": cached.IsCollected,
+			"timestamp":   cached.LastBroadcastAt,
+		}
+		if cached.CollectedByClientID != "" {
+			row["collectedByClientId"] = cached.CollectedByClientID
+		}
+		if cached.OwnerClientID != "" {
+			row["ownerClientId"] = cached.OwnerClientID
+		}
+		itemRows = append(itemRows, row)
+	}
+
 	charSnaps := make([]interface{}, 0, len(ms.lastCharacterStates))
 	for cid, v := range ms.lastCharacterStates {
 		if _, stillHere := ms.clients[cid]; stillHere {
@@ -669,8 +857,22 @@ func (ms *MultiplayerServer) pushSnapshotToSession(sessionID string) {
 	}
 	ms.mu.RUnlock()
 
-	if itemSnap != nil {
-		_ = ms.sendToSession(sessionID, "item-state-update", itemSnap)
+	if len(itemRows) > 0 {
+		log.Printf("[Bootstrap] Sending %d item rows to session %s", len(itemRows), sessionID)
+		for _, r := range itemRows {
+			if row, ok := r.(map[string]interface{}); ok {
+				if pos, ok := row["pos"].([]interface{}); ok && len(pos) == itemPosLen {
+					x, _ := pos[0].(float64)
+					y, _ := pos[1].(float64)
+					z, _ := pos[2].(float64)
+					log.Printf("[Bootstrap]   %s itemName=%v pos=(%.2f,%.2f,%.2f)", row["instanceId"], row["itemName"], x, y, z)
+				}
+			}
+		}
+		_ = ms.sendToSession(sessionID, "item-state-update", map[string]interface{}{
+			"updates":   itemRows,
+			"timestamp": time.Now().UnixMilli(),
+		})
 	}
 	if len(charSnaps) > 0 {
 		_ = ms.sendToSession(sessionID, "character-state-update", map[string]interface{}{
@@ -722,8 +924,32 @@ func (ms *MultiplayerServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	sse := datastar.NewSSE(w, r)
 	ms.registerSSESession(sessionID, sse)
 
-	ms.pushSnapshotToSession(sessionID)
+	// Authority snapshot MUST be pushed before the item-transform snapshot so that by the
+	// time the client's item-state-update listener fires, the authority tracker already
+	// knows who owns each item. This lets the client correctly skip setting DYNAMIC bodies
+	// to kinematic before the item snapshot arrives, preventing the spawn-position freeze
+	// where items were kinematic at the wrong (spawn) positions.
 	ms.pushAuthoritySnapshotToSession(sessionID)
+	ms.pushSnapshotToSession(sessionID)
+
+	// Settled-positions safety net: the bootstrap snapshot above reflects whatever is in
+	// itemTransformCache at this exact moment, which may contain pre-settlement scatter
+	// positions if the env-authority client's physics items had not yet come to rest when
+	// it first published rows. Physics items typically settle within ~1 second of spawn.
+	// Scheduling a second snapshot push at 1.5 s ensures the joining client receives the
+	// correct floor-level transforms even if it arrived during the settling window.
+	// If items were already settled at join time the two snapshots are identical (harmless
+	// redundancy). The goroutine exits early if the session has already closed.
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		ms.sseMu.RLock()
+		stillOpen := ms.sseSessions[sessionID] != nil && !ms.sseSessions[sessionID].IsClosed()
+		ms.sseMu.RUnlock()
+		if stillOpen {
+			log.Printf("[Bootstrap] Sending settled-positions re-snapshot to session %s", sessionID)
+			ms.pushSnapshotToSession(sessionID)
+		}
+	}()
 
 	ms.mu.RLock()
 	total := len(ms.clients)
@@ -865,11 +1091,12 @@ func (ms *MultiplayerServer) handleEnvSwitch(w http.ResponseWriter, r *http.Requ
 					envName:         oldEnv,
 					newAuthorityID:  "",
 					prevAuthorityID: clientID,
-					reason:          "disconnect",
+					reason:          "env_switch", // §6.9: reason MUST be "env_switch" for env-switch transitions
 				})
 			} else if _, had := ms.envAuthority[oldEnv]; had {
 				// Defensive: if the authority was someone else (shouldn't happen when the
 				// client was in envClientOrder) leave it alone.
+				_ = had
 			}
 		} else if ms.envAuthority[oldEnv] == clientID {
 			next := ms.envClientOrder[oldEnv][0]
@@ -878,7 +1105,7 @@ func (ms *MultiplayerServer) handleEnvSwitch(w http.ResponseWriter, r *http.Requ
 				envName:         oldEnv,
 				newAuthorityID:  next,
 				prevAuthorityID: clientID,
-				reason:          "disconnect",
+				reason:          "env_switch", // §6.9: reason MUST be "env_switch" for env-switch transitions
 			})
 		}
 	}
@@ -891,7 +1118,7 @@ func (ms *MultiplayerServer) handleEnvSwitch(w http.ResponseWriter, r *http.Requ
 			envName:         newEnv,
 			newAuthorityID:  clientID,
 			prevAuthorityID: "",
-			reason:          "join",
+			reason:          "arrival", // §6.9: first arrival into empty env
 		})
 	}
 	newEnvAuthID = ms.envAuthority[newEnv]
@@ -906,9 +1133,9 @@ func (ms *MultiplayerServer) handleEnvSwitch(w http.ResponseWriter, r *http.Requ
 	now := time.Now().UnixMilli()
 	for _, t := range transitions {
 		payload := map[string]interface{}{
-			"envName":   t.envName,
-			"reason":    t.reason,
-			"timestamp": now,
+			"environmentName": t.envName, // §6.9 field name
+			"reason":          t.reason,
+			"timestamp":       now,
 		}
 		if t.newAuthorityID == "" {
 			payload["newAuthorityId"] = nil
@@ -927,7 +1154,7 @@ func (ms *MultiplayerServer) handleEnvSwitch(w http.ResponseWriter, r *http.Requ
 	// transition (joining a non-empty env whose authority was unchanged).
 	if newEnvAuthID != "" {
 		_ = ms.sendToSession(sessionID, "env-item-authority-changed", map[string]interface{}{
-			"envName":         newEnv,
+			"environmentName": newEnv, // §6.9 field name
 			"newAuthorityId":  newEnvAuthID,
 			"prevAuthorityId": nil,
 			"reason":          "snapshot",

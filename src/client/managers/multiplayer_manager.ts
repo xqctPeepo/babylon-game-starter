@@ -392,7 +392,7 @@ export class MultiplayerManager {
       const auth = body.envAuthority?.[newEnv];
       if (auth !== undefined) {
         const synthetic: EnvItemAuthorityChangedMessage = {
-          envName: newEnv,
+          environmentName: newEnv, // §6.9 field name
           newAuthorityId: auth ?? null,
           prevAuthorityId: null,
           reason: 'snapshot',

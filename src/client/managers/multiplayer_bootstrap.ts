@@ -261,8 +261,21 @@ export async function initMultiplayerAfterCharacterReady(
     }
   };
 
-  /** Last `item-state-update` we applied; re-run on environment change for late-join alignment. */
-  let lastAppliedItemSnapshot: ItemStateUpdate | null = null;
+  // Merged item-state dictionary: instanceId → most recent ItemInstanceState received.
+  // Using a Map rather than storing the last raw ItemStateUpdate message ensures that
+  // switching environments always re-applies the FULL accumulated position for every
+  // known item, not just the items present in the most recent (often 1-2 item) dirty
+  // broadcast. Without this, a 9-item bootstrap followed by live 2-item partial updates
+  // would leave 7 items at their scene spawn heights on environment entry.
+  const knownItemStates = new Map<string, ItemInstanceState>();
+
+  // Build a synthetic ItemStateUpdate from all currently known item states.
+  // Used when re-applying state on env switch / items-ready / auth-changed.
+  const buildFullSnapshot = (): ItemStateUpdate => ({
+    updates: Array.from(knownItemStates.values()),
+    collections: [],
+    timestamp: Date.now()
+  });
 
   const applyItemSnapshot = (msg: ItemStateUpdate): void => {
     const envName = sceneManager.getCurrentEnvironment();
@@ -277,7 +290,7 @@ export async function initMultiplayerAfterCharacterReady(
         // this client authored, the server stamps `ownerClientId` onto every accepted
         // update (handlers.go handleItemStateUpdate). Dropping server-stamped self rows
         // prevents the broken feedback loop where a kinematic body keeps re-applying its
-        // own sampled transform via setTargetTransform + setLinearVelocity.
+        // own sampled transform back onto itself.
         if (selfId && st.ownerClientId === selfId) {
           continue;
         }
@@ -301,8 +314,18 @@ export async function initMultiplayerAfterCharacterReady(
     if (!msg || (!msg.updates?.length && !msg.collections?.length)) {
       return;
     }
+    // Merge this update into the accumulated known-state dictionary so that the
+    // next env-switch / items-ready re-apply uses the FULL position set, not
+    // just the items present in this (possibly partial) broadcast.
+    if (msg.updates?.length) {
+      for (const rawSt of msg.updates) {
+        const st = coerceItemInstanceState(rawSt);
+        if (st) {
+          knownItemStates.set(st.instanceId, st);
+        }
+      }
+    }
     applyItemSnapshot(msg);
-    lastAppliedItemSnapshot = msg;
     // MULTIPLAYER_SYNCH.md §5.2.2 rule 4 AOI-enter bootstrap: once the first
     // item-state-update for the current env has been absorbed, treat the env's
     // authority snapshot as applied for the purposes of the publish gate. This
@@ -351,8 +374,8 @@ export async function initMultiplayerAfterCharacterReady(
   // placement caused the snapshot replay to be dropped, leaving every client with an
   // empty envAuthority map and breaking the tier-2 owner resolution.
   const unsubEnvAuthority = mp.on('env-item-authority-changed', (raw: unknown) => {
-    const msg = raw as { envName?: string; newAuthorityId?: string | null } | null;
-    const envName = msg?.envName;
+    const msg = raw as { environmentName?: string; newAuthorityId?: string | null } | null;
+    const envName = msg?.environmentName; // §6.9 field name
     if (!envName) {
       return;
     }
@@ -369,6 +392,16 @@ export async function initMultiplayerAfterCharacterReady(
       envName === sceneManager.getCurrentEnvironment()
     ) {
       seedMotionTypesForEnv(envName);
+      // Re-apply the last received item snapshot now that items have been set to their
+      // correct motion types. This covers the race where the item-transform bootstrap
+      // arrived BEFORE the auth snapshot (server now sends auth first, but this is
+      // defense-in-depth): with the mesh-direct apply (§B.9), the mesh write itself
+      // always succeeds, but on a still-DYNAMIC body the post-step would overwrite it
+      // with simulated position. Re-applying after seedMotionTypesForEnv flips items
+      // to ANIMATED ensures the authoritative positions stick.
+      if (knownItemStates.size > 0) {
+        applyItemSnapshot(buildFullSnapshot());
+      }
     }
   });
 
@@ -415,26 +448,52 @@ export async function initMultiplayerAfterCharacterReady(
     return authorityTracker.isOwnedBySelf(envScopedInstanceId);
   };
 
-  // MULTIPLAYER_SYNCH.md §4.5 SSE-open ordering: by the time `mp.join()` resolves,
-  // the server has had the opportunity to replay `pushAuthoritySnapshotToSession` on
-  // the just-opened SSE channel. Any explicit itemOwners entries have been (or are
-  // being) delivered as `item-authority-changed` events and absorbed by the tracker
-  // above. Mark the current env's authority snapshot as applied so the publish gate
-  // can allow the "unowned + base-synchronizer" fallback from now on (§6.2 rule 5
-  // trigger c). This is safe even if the server later sends additional signals: the
-  // tracker's apply-change logic is purely monotonic.
+  // MULTIPLAYER_SYNCH.md §4.5 SSE-open ordering: `datastarClient.connect()` resolves
+  // on the SSE `onopen` callback — i.e. the moment the HTTP connection is established,
+  // which is BEFORE any SSE message events are delivered. The browser's event loop
+  // processes `onopen` synchronously (as a Promise microtask chain), and SSE message
+  // events are queued as separate tasks. Therefore `env-item-authority-changed` from
+  // `pushAuthoritySnapshotToSession` has NOT yet been processed when execution reaches
+  // here.
+  //
+  // Consequence: `authorityTracker.envAuthority` is still empty. Calling
+  // `seedMotionTypesForEnv` at this point would compute `isOwnedBySelf = false` for
+  // every item (because the env-authority tier cannot resolve without `envAuthority`
+  // being populated), silently kinematising every item — including those owned by the
+  // local client as env-authority — at their spawn/scatter positions. Those scatter
+  // positions are then published as dirty rows and cached by the server. When a late
+  // joiner's bootstrap snapshot is served from that cache they receive the scatter
+  // positions instead of the settled floor positions.
+  //
+  // Fix: only call `seedMotionTypesForEnv` / `applyItemSnapshot` here when
+  // `envAuthority` is already populated for this env (i.e. the SSE snapshot arrived
+  // before mp.join() resolved — unlikely in practice, but technically possible on a
+  // very fast connection). When auth is not yet known, the `env-item-authority-changed`
+  // listener (registered before `mp.join()`, see Fix 2 comment above) will call
+  // `seedMotionTypesForEnv` with correct authority as soon as the SSE event arrives,
+  // which happens in the very next event-loop task after this synchronous block exits.
+  //
+  // markSnapshotApplied is still called immediately so the "unowned + base-synchronizer"
+  // publish-gate fallback (§6.2 rule 5 trigger c) can fire for environments whose
+  // authority is legitimately absent from the server (no other client present).
   const envOnJoin = sceneManager.getCurrentEnvironment();
   if (envOnJoin) {
     authorityTracker.markSnapshotApplied(envOnJoin);
-    // Fix 3 (re-seed after setSelfClientId). The env-item-authority-changed snapshot
-    // may have landed during join (now captured by the pre-join listener, Fix 2), but
-    // tier-2 resolution in `isOwnedBySelf` can only return the correct result once
-    // `selfClientId` is set. Re-seed motion types now so presents/cake in the current
-    // env immediately reflect the tier-2 ownership, satisfying the
-    // DYNAMIC-only-on-owner invariant from the first frame onwards.
-    if (sceneManager.isEnvironmentLoaded()) {
+    if (sceneManager.isEnvironmentLoaded() && authorityTracker.getEnvAuthority(envOnJoin) !== null) {
+      // Auth is already resolved (rare fast-path). Seed motion types and apply any
+      // buffered snapshot now so items land in their correct kinematic/dynamic state
+      // without waiting for the next event-loop task.
       seedMotionTypesForEnv(envOnJoin);
+      if (knownItemStates.size > 0) {
+        applyItemSnapshot(buildFullSnapshot());
+      }
     }
+    // If env authority is NOT yet known: items remain in their default DYNAMIC state
+    // (spawn physics). The `env-item-authority-changed` listener handles the seed
+    // correctly once the SSE event arrives, guaranteeing the env-authority's items
+    // stay DYNAMIC and non-owner items are correctly kinematised before any
+    // mesh-direct apply lands (MULTIPLAYER_SYNCH.md Appendix B.2 invariant 1
+    // "seed-before-apply" and §B.9 for the apply primitive itself).
   }
 
   const worldPhysicsItemSync = new ItemSync(WORLD_PHYS_SYNC_MS);
@@ -561,6 +620,13 @@ export async function initMultiplayerAfterCharacterReady(
     if (envName === sceneManager.getCurrentEnvironment()) {
       seedMotionTypesForEnv(envName);
       rebuildProximityItems(envName);
+      // Re-apply full accumulated item state now that (a) physics bodies exist and (b) motion
+      // types have been resolved. Using the merged knownItemStates rather than just the last
+      // raw message ensures all items are placed correctly, not only those in the most recent
+      // partial broadcast.
+      if (knownItemStates.size > 0) {
+        applyItemSnapshot(buildFullSnapshot());
+      }
     }
   };
 
@@ -609,6 +675,7 @@ export async function initMultiplayerAfterCharacterReady(
   };
 
   let lastSend = 0;
+  let lastPublishDiagMs = 0;
 
   const obs = scene.onBeforeRenderObservable.add(() => {
     if (!mp.isMultiplayerActive()) {
@@ -642,14 +709,19 @@ export async function initMultiplayerAfterCharacterReady(
         rebuildProximityItems(envNow);
       }
     } else if (envLoadedNow && !lastEnvironmentLoaded) {
-      // Environment finished (re)loading — re-apply last authoritative snapshot so a
-      // late joiner immediately sees collected presents and repositioned cake.
+      // Environment finished (re)loading. Seed motion types FIRST so items that
+      // were spawned DYNAMIC (race: env loaded before mp.join resolved, before
+      // resolveInitialOwnership was registered) become ANIMATED (kinematic) before
+      // we write mesh transforms via applyItemSnapshot (§B.9 mesh-direct apply).
+      // On a still-DYNAMIC body, Havok's post-step would override the written mesh
+      // position with simulated-falling position — so the seed must precede the
+      // apply to keep the authoritative pose stable.
       lastEnvironmentLoaded = true;
-      if (lastAppliedItemSnapshot) {
-        applyItemSnapshot(lastAppliedItemSnapshot);
-      }
       seedMotionTypesForEnv(envNow);
       rebuildProximityItems(envNow);
+      if (knownItemStates.size > 0) {
+        applyItemSnapshot(buildFullSnapshot());
+      }
     } else {
       lastEnvironmentLoaded = envLoadedNow;
     }
@@ -669,18 +741,41 @@ export async function initMultiplayerAfterCharacterReady(
         }
       }
       const itemStates = sampleConfiguredItems(envNow);
+      let includedCount = 0;
+      let excludedCount = 0;
       for (const st of itemStates) {
         if (st.isCollected) {
           worldPhysicsItemSync.updateItemState(st);
+          includedCount++;
           continue;
         }
         if (includeRow(st)) {
           worldPhysicsItemSync.updateItemState(st);
+          includedCount++;
+        } else {
+          excludedCount++;
         }
       }
       const worldUpdate = worldPhysicsItemSync.createStateUpdate(Date.now());
       if (worldUpdate && ((worldUpdate.updates?.length ?? 0) > 0 || (worldUpdate.collections?.length ?? 0) > 0)) {
         void mp.updateItemState(worldUpdate);
+      }
+
+      // Periodic publish-gate diagnostic: log once every 10 s so silent publish
+      // failures surface without flooding the console (Appendix B.8).
+      const nowMs = Date.now();
+      if (nowMs - lastPublishDiagMs >= 10_000) {
+        lastPublishDiagMs = nowMs;
+        const selfId = authorityTracker.getSelfClientId();
+        const envAuth = authorityTracker.getEnvAuthority(envNow);
+        const snapshotApplied = authorityTracker.hasSnapshotAppliedFor(envNow);
+        const isSelf = selfId && envAuth === selfId;
+        console.warn(
+          `[SYNC_GATE] env="${envNow}" selfId="${selfId}" envAuth="${envAuth}" isEnvAuth=${isSelf} ` +
+          `snapshotApplied=${snapshotApplied} isSynchronizer=${mp.isSynchronizer()} ` +
+          `items=${itemStates.length} included=${includedCount} excluded=${excludedCount} ` +
+          `updateRows=${worldUpdate?.updates?.length ?? 0}`
+        );
       }
     }
 

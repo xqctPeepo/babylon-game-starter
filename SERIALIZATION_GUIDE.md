@@ -6,7 +6,7 @@
 
 This document provides a complete reference for serialization, deserialization, and mesh transform application in the multiplayer system.
 
-> **Item / physics-object paths are matrix-only** (Invariants M and E in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state)). Every `ItemInstanceState` row on the wire carries one transform field: `matrix` — a 16-float row-major 4x4 world matrix. Owners sample via `sampleWorldMatrix(mesh)`; non-owners apply via `applyMatrixToBody(body, matrix)`. No `position`, `rotation`, or `velocity` fields; no Euler reads or writes on item paths. The Euler / quaternion serializers described elsewhere in this doc are used by **character sync only**.
+> **Item / physics-object paths are pose-only** (Invariants P and E in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state)). Every `ItemInstanceState` row on the wire carries two transform fields: `pos` (3 floats, world-space position) and `rot` (4 floats, unit quaternion `[x,y,z,w]`). Owners sample via `sampleMeshPose(mesh)`; non-owners apply via `applyPoseToMesh(mesh, pose)`. No `matrix`, `position` (spelled out), Euler `rotation`, `velocity`, or `scale` fields on item paths. The Euler / quaternion serializers described elsewhere in this doc are used by **character sync only**.
 
 ---
 
@@ -444,13 +444,18 @@ After:  remoteMesh.position = [10.5, 5.2, -15.3], remoteMesh.rotation.y = 1.5
 
 ```typescript
 /**
- * Complete item state application (Invariants M and E).
+ * Complete item state application (Invariants P and E).
  *
- * Transform application is matrix-only: the row carries one field, `matrix`,
- * a row-major 4x4 world matrix of length 16. We decompose locally into
- * (scale, quaternion, position), discard scale, and drive the kinematic
- * physics body via setTargetTransform. We NEVER write to mesh.rotation
- * (Euler) on this path. Velocity, linear or angular, is never applied.
+ * Transform application is pose-only: the row carries two fields, `pos`
+ * (3-float world-space position) and `rot` (4-float unit quaternion
+ * `[x,y,z,w]`). We write them directly onto `mesh.position` and
+ * `mesh.rotationQuaternion`; Havok's pre-step (`disablePreStep = false`,
+ * the Babylon default) copies mesh → body on the next tick for kinematic
+ * replicas. We NEVER write to `mesh.rotation` (Euler), never replicate
+ * velocity, and never replicate `mesh.scaling` — the receiver's local
+ * scale (including the negative-axis flips applied in
+ * `createCollectibleInstance` for GLB re-orientation) is the single
+ * source of truth for scale.
  *
  * Collection status:
  * - isCollected: true  → mesh.isVisible = false, mesh.setEnabled(false)
@@ -462,19 +467,12 @@ static applyRemoteItemState(
 ): void {
   if (!itemMesh) return;
 
-  const body = itemMesh.physicsBody ?? null;
-  if (body && !body.isDisposed) {
-    // Kinematic apply — decompose world matrix and set target transform.
-    applyMatrixToBody(body, state.matrix);
-  } else {
-    // Mesh-only fallback (no body): write pose through rotationQuaternion.
-    const m = BABYLON.Matrix.FromArray(state.matrix);
-    const scale = new BABYLON.Vector3();
-    const quat = new BABYLON.Quaternion();
-    const pos = new BABYLON.Vector3();
-    m.decompose(scale, quat, pos);
-    itemMesh.position.copyFrom(pos);
-    (itemMesh.rotationQuaternion ??= new BABYLON.Quaternion()).copyFrom(quat);
+  if (!state.isCollected) {
+    // Pose-only apply — write directly onto the mesh.
+    //   - Position: mesh.position.set(pos[0], pos[1], pos[2])
+    //   - Rotation: mesh.rotationQuaternion.set(rot[0..3])
+    //   - Scale:    untouched (local config value on every client).
+    applyPoseToMesh(itemMesh, { pos: state.pos, rot: state.rot });
   }
 
   try {

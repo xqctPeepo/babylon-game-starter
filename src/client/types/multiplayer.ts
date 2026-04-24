@@ -75,15 +75,24 @@ export interface CharacterState {
  * [MULTIPLAYER_SYNCH.md §5.2 / §8.2](../../../MULTIPLAYER_SYNCH.md#52-item-state)
  * for the normative shape.
  *
- * **Invariant M (matrix-only transform).** The row carries exactly one transform field:
- * `matrix`, a row-major 4x4 world matrix of length exactly 16, produced on the owner by
- * `mesh.computeWorldMatrix(true).asArray()`. Non-owners decompose it locally into
- * `(scale, quaternion, position)`, discard the scale, and apply via
- * `body.setTargetTransform(position, quaternion)`.
+ * **Invariant P (pose-only transport).** The row carries the item's pose as exactly two
+ * fields: `pos` (world-space position, 3 floats) and `rot` (unit quaternion, 4 floats).
+ * The sender reads these from the mesh's LOCAL channels (`mesh.position` and
+ * `mesh.rotationQuaternion`); for all replicated items the mesh is unparented at spawn,
+ * so `mesh.position` **is** the world position and `mesh.rotationQuaternion` is the
+ * pre-scale world rotation. The receiver writes the same two fields back onto the
+ * mesh's local channels verbatim — no matrix decomposition on either end. Babylon's
+ * TRS pipeline recomputes the world matrix from `position · rotationQuaternion · scaling`,
+ * and since every client spawned the mesh with identical local `scaling` from the same
+ * `environment.items[*].instances[*].scale` config, the world matrices match across
+ * clients without replicating scale. This is what enables collectibles with negative
+ * local scale (sign-flipped `-x`, `-z` for GLB re-orientation) to sync correctly — the
+ * flip never crosses the wire so it cannot double itself on the receiver.
  *
- * **Invariant E (no Euler on item paths).** There is no `position`, `rotation`, or
- * `velocity` field on this interface and none on the wire. The Euler channel of the mesh
- * (`mesh.rotation.x/y/z`) is never sampled and never written on item paths.
+ * **Invariant E (no Euler on item paths).** The Euler channel of the mesh
+ * (`mesh.rotation.x/y/z`) is never sampled and never written on item paths. Authoring
+ * configs may express rotation as Euler (`config_euler_rotation.ts`), but that is
+ * converted to quaternion at spawn and never read again by the item wire.
  *
  * Under the three-tier authority model
  * ([§4.7](../../../MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) +
@@ -102,8 +111,10 @@ export interface CharacterState {
 export interface ItemInstanceState {
   readonly instanceId: string;
   readonly itemName: string;
-  /** Row-major 4x4 world matrix; length exactly 16. Invariant M (no position/rotation/velocity). */
-  readonly matrix: readonly number[];
+  /** World-space position `[x, y, z]`. Invariant P; live rows MUST carry this. */
+  readonly pos: Vector3Serializable;
+  /** Unit quaternion `[x, y, z, w]` for the mesh's local rotation. Invariant P; live rows MUST carry this. */
+  readonly rot: QuaternionSerializable;
   readonly isCollected: boolean;
   readonly collectedByClientId?: string;
   /**
@@ -326,10 +337,10 @@ export interface ItemAuthorityChangedMessage {
  * snapshot replay on SSE open (so late joiners learn the current env-authority immediately).
  */
 export interface EnvItemAuthorityChangedMessage {
-  readonly envName: string;
+  readonly environmentName: string; // §6.9 field name
   readonly newAuthorityId: string | null;
   readonly prevAuthorityId: string | null;
-  readonly reason: 'join' | 'disconnect' | 'snapshot' | 'peer-joined';
+  readonly reason: 'arrival' | 'disconnect' | 'env_switch' | 'snapshot' | 'peer-joined';
   readonly timestamp: number;
 }
 

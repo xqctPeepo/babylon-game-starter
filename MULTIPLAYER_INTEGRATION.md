@@ -150,11 +150,12 @@ Re-entry is a normal arrival: returning to an env you previously held authority 
 
 #### Item Transform Dirty Filter (pseudo-code)
 
-Item rows carry a single transform field — `Matrix [16]float64`, the row-major 4x4 world matrix (Invariant M in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state)). No `Position`, no `Rotation`, no `Velocity`. The dirty filter therefore reduces to a single 16-element epsilon comparator.
+Item rows carry a pose pair — `Pos [3]float64` (world-space position, meters) and `Rot [4]float64` (unit quaternion `[x,y,z,w]`). See Invariant P in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state). No `Matrix`, no `Euler`, no `Velocity`, no `Scale`. The dirty filter therefore runs two independent comparators — an L∞ translation threshold on `Pos` and an absolute-quaternion-dot-product threshold on `Rot`.
 
 ```go
 type cachedItemTransform struct {
-  matrix                        [16]float64
+  pos                           [3]float64
+  rot                           [4]float64
   isCollected                   bool
   collectedByClientID           string
   ownerClientID                 string
@@ -162,11 +163,18 @@ type cachedItemTransform struct {
 }
 // map[instanceId] cachedItemTransform lives on the MultiplayerServer.
 
-const matrixEpsilon = 1e-4 // unitless; matrix entries mix meters and direction cosines
+const posEpsilon       = 5e-3    // meters; must exceed Havok settled-body idle jitter (~10 mm observed)
+const rotDotThreshold  = 0.99996 // ≈ cos(0.5°); |q_new · q_cached| below this is "different orientation"
 
-func matrixDirty(a, b [16]float64) bool {
-  for i := 0; i < 16; i++ { if math.Abs(a[i]-b[i]) > matrixEpsilon { return true } }
+func posDirty(a, b [3]float64) bool {
+  for i := 0; i < 3; i++ { if math.Abs(a[i]-b[i]) > posEpsilon { return true } }
   return false
+}
+
+func rotDirty(a, b [4]float64) bool {
+  dot := a[0]*b[0] + a[1]*b[1] + a[2]*b[2] + a[3]*b[3]
+  if dot < 0 { dot = -dot } // quaternion double-cover: q ≡ -q
+  return dot < rotDotThreshold
 }
 
 func (ms *MultiplayerServer) applyDirtyFilter(rows []ItemInstanceState) []ItemInstanceState {
@@ -174,7 +182,8 @@ func (ms *MultiplayerServer) applyDirtyFilter(rows []ItemInstanceState) []ItemIn
   for _, r := range rows {
     cached, ok := ms.itemTransformCache[r.InstanceID]
     dirty := !ok ||
-      matrixDirty(cached.matrix, r.Matrix) ||
+      posDirty(cached.pos, r.Pos) ||
+      rotDirty(cached.rot, r.Rot) ||
       cached.isCollected != r.IsCollected ||
       cached.collectedByClientID != r.CollectedByClientID ||
       cached.ownerClientID != r.OwnerClientID
@@ -324,24 +333,21 @@ function applyItemSnapshot(update: ItemStateUpdate): void {
     applyRemoteCollectedWithFeedback(ev.instanceId);
   }
 
-  // 2. Updates — drop self-owned rows (defense-in-depth); non-owned rows via kinematic target.
-  //    Each row carries exactly one transform field: row.matrix (16 floats, row-major;
-  //    Invariant M). We decompose locally and pass position + quaternion to the
-  //    kinematic-target API. We NEVER touch mesh.rotation (Euler) on this path
-  //    (Invariant E) and NEVER call setLinearVelocity / applyImpulse / addForce
-  //    on a non-owned body.
-  const scratchPos = new BABYLON.Vector3();
-  const scratchQuat = new BABYLON.Quaternion();
-  const scratchScale = new BABYLON.Vector3();
+  // 2. Updates — drop self-owned rows (defense-in-depth); non-owned rows via mesh-direct write.
+  //    Each row carries two transform fields: row.pos (3 floats) and row.rot (4 floats,
+  //    unit quaternion) — Invariant P. We write them directly onto the mesh's local
+  //    channels; Havok's pre-step sync propagates the pose onto the ANIMATED body before
+  //    the next physics tick. We NEVER touch mesh.rotation (Euler) on this path
+  //    (Invariant E), NEVER write mesh.scaling (static per-client spawn value), and
+  //    NEVER call setLinearVelocity / applyImpulse / addForce on a non-owned body.
   for (const row of update.updates ?? []) {
     if (authorityTracker.isOwnedBySelf(row.instanceId)) {
       continue; // server should never send this under owner-pin; drop if it does
     }
-    const body = collectiblesManager.getPhysicsBody(row.instanceId);
-    if (!body) continue;
+    const mesh = collectiblesManager.getMesh(row.instanceId);
+    if (!mesh) continue;
     CollectiblesManager.setItemKinematic(row.instanceId, true);
-    BABYLON.Matrix.FromArray(row.matrix).decompose(scratchScale, scratchQuat, scratchPos);
-    body.setTargetTransform(scratchPos, scratchQuat);
+    applyPoseToMesh(mesh, { pos: row.pos, rot: row.rot });
   }
 }
 
@@ -620,7 +626,7 @@ private updateCharacterState(): void {
 
 #### Item Sync Integration
 
-Items use a **three-tier authority model** — see [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) and [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle). Collection events are first-write-wins, so any client may emit them. Transform rows (each carrying a single `matrix: [16]float64` per Invariant M) must come from the item's **resolved owner**:
+Items use a **three-tier authority model** — see [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle) and [§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle). Collection events are first-write-wins, so any client may emit them. Transform rows (each carrying `pos: [3]float64` and `rot: [4]float64` per Invariant P) must come from the item's **resolved owner**:
 
 1. The **explicit item owner** (an active `itemOwners` entry from proximity claims), if any.
 2. Otherwise, the **environment item authority** for the item's environment — the first-in-env client, with ordered failover.
@@ -664,7 +670,7 @@ private publishOwnedItemStates(): void {
 }
 ```
 
-Per-row authorization is enforced by the server ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)) — unauthorized rows are silently dropped rather than failing the whole PATCH. The server additionally applies a **dirty filter** to the surviving rows ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): rows whose `matrix` (16-float row-major world matrix) is within `matrixEpsilon` element-wise of the cached value AND whose categorical fields match exactly are dropped from the broadcast. Clients SHOULD still filter locally (send at most ~10 Hz, skip rows that haven't changed beyond a local threshold) to avoid wasted upstream bandwidth; the server-side filter is a safety net, not a substitute.
+Per-row authorization is enforced by the server ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)) — unauthorized rows are silently dropped rather than failing the whole PATCH. The server additionally applies a **dirty filter** to the surviving rows ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): rows whose `pos` (per-component within `posEpsilon`) AND `rot` (quaternion dot-product at or above `rotDotThreshold`) match the cached value, AND whose categorical fields match exactly, are dropped from the broadcast. Clients SHOULD still filter locally (send at most ~10 Hz, skip rows that haven't changed beyond a local threshold) to avoid wasted upstream bandwidth; the server-side filter is a safety net, not a substitute.
 
 #### Effects Sync Integration
 
@@ -934,7 +940,7 @@ new SkySync(100);
 
 1. **Base-synchronizer-only global world state**: lights / sky / env particles require `X-Client-ID == baseSynchronizerId`; other senders get `403 Forbidden` ([§7.2](MULTIPLAYER_SYNCH.md#72-global-world-state-authorization)).
 2. **Three-tier item authorization**: item-state rows are filtered per `instanceId` by resolved owner — explicit `itemOwners` entry first, else `envAuthority` for the item's environment, else drop ([§7.5](MULTIPLAYER_SYNCH.md#75-item-authority-authorization)). Rows that fail the filter are dropped silently rather than failing the whole request. Base-synchronizer role alone confers **no** item write privilege.
-3. **Server-side dirty filter**: surviving rows are compared to the server's `itemTransformCache` via a single 16-float `matrixEpsilon` element-wise comparator on the `matrix` field (Invariant M) plus exact-match on categorical fields; unchanged repeats are silently dropped from the broadcast without affecting activity tracking ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)).
+3. **Server-side dirty filter**: surviving rows are compared to the server's `itemTransformCache` via a per-component `posEpsilon` comparator on `pos` and a quaternion-dot-product comparator on `rot` (Invariant P), plus exact-match on categorical fields; unchanged repeats are silently dropped from the broadcast without affecting activity tracking ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)).
 4. **Timestamp Validation**: Rejects updates older than 30 seconds.
 5. **Position Bounds**: Validates positions within ±10000 units.
 6. **Animation State**: Only accepts valid animation states.
@@ -958,10 +964,11 @@ new SkySync(100);
 
 ### Server-Side Dirty Filter (Item Transforms)
 
-The server runs a second-stage filter after authority row filtering ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): accepted `ItemInstanceState` rows are compared against the last-broadcast cached values for the same `instanceId`. Rows whose `matrix` (16-float row-major world matrix, Invariant M) falls within `matrixEpsilon` element-wise AND whose categorical fields (`isCollected`, `collectedByClientId`, `ownerClientId`) are exactly equal are considered CLEAN and dropped from the outgoing broadcast.
+The server runs a second-stage filter after authority row filtering ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)): accepted `ItemInstanceState` rows are compared against the last-broadcast cached values for the same `instanceId`. Rows whose `pos` is within `posEpsilon` per component AND whose `rot` quaternion has `|dot| ≥ rotDotThreshold` AND whose categorical fields (`isCollected`, `collectedByClientId`, `ownerClientId`) are exactly equal are considered CLEAN and dropped from the outgoing broadcast.
 
-Default:
-- `matrixEpsilon = 1e-4` (unitless; matrix entries mix meters and direction cosines, so a single tolerance covers both).
+Defaults:
+- `posEpsilon = 5e-3` (meters; must exceed Havok settled-body idle jitter, empirically O(10 mm)).
+- `rotDotThreshold = 0.99996` (≈ cos(0.5°); uses absolute dot product so the quaternion double-cover `q ≡ -q` is honored).
 
 Activity bookkeeping (`itemOwners.lastUpdatedAt`) is refreshed for CLEAN rows too — only the broadcast is suppressed. Late joiners are seeded by the **per-client freshness matrix AOI-enter** hook ([§5.2.2](MULTIPLAYER_SYNCH.md#522-per-client-freshness-matrix) rule 4): every item cell for the arriving client is initialized to `stale`, so the next broadcast window emits a per-recipient `item-state-update` containing the full `itemTransformCache` for the arrived env plus any undelivered collection events. There is no separate SSE-open replay code path.
 
@@ -1091,7 +1098,7 @@ Diagnostic:
 - Confirm that on receiving env-authority the client flipped item bodies in that env to `DYNAMIC` (`PhysicsMotionType.DYNAMIC`) and resumed sampling.
 
 ### Item rows reach the server but never appear on peers
-- Accepted rows may still be dropped by the **server-side dirty filter** if the row's `matrix` is element-wise within `matrixEpsilon` of the cached value AND its categorical fields match. Confirm the values genuinely differ from the cached state — temporarily lower `matrixEpsilon` or inject a large test displacement to verify the broadcast path.
+- Accepted rows may still be dropped by the **server-side dirty filter** if the row's `pos` is within `posEpsilon` of the cached value AND its `rot` is within `rotDotThreshold` AND its categorical fields match. Confirm the values genuinely differ from the cached state — temporarily lower `posEpsilon` / raise the effective rotation threshold, or inject a large test displacement to verify the broadcast path.
 - A client that enters an env and does not see any items usually indicates the **freshness matrix AOI-enter** hook was not invoked for that session's current env — verify `onEnvEnter` runs on initial join, on server-observed env switch, and on SSE reconnect.
 
 ### Env-authority's own items hover / oscillate / fall in slow motion
@@ -1113,9 +1120,9 @@ Diagnostic:
 Symptom: On P1 the cake falls and settles; on P2 the same items visibly thrash / whip / spin despite P1 not touching them. Classic rotation-representation ambiguity.
 
 Diagnostic:
-- Confirm the wire payload carries `matrix: [16 floats]` per row and does NOT carry any of `position`, `rotation`, `velocity`, or a quaternion tuple (Invariant M). Any remnant of the per-component schema will cause the owner's sampler and the non-owner's applier to disagree about which rotation channel is authoritative.
-- Confirm `ItemSync.applyRemoteItemState` calls `body.setTargetTransform(pos, quat)` after decomposing the incoming matrix, and does NOT call `setLinearVelocity` / `setAngularVelocity` on non-owned bodies. Kinematic bodies receiving both a target transform and a velocity will produce exactly the whipping symptom as the velocity integration fights the target.
-- Confirm no code path writes `mesh.rotation.x/y/z` (Euler) on any item mesh (Invariant E). Legacy "spin in place" animations on collectibles (see `CollectiblesManager.addRotationAnimation`) MUST be quaternion-based (`rotationQuaternion.multiplyInPlace(dq)`) and MUST be gated to massless (`instance.mass === 0`) items so they never conflict with a kinematic target.
+- Confirm the wire payload carries `pos: [3 floats]` AND `rot: [4 floats]` per row and does NOT carry any of `matrix`, `position` (spelled out), `rotation` (Euler), `velocity`, or `scale` (Invariant P). Any remnant of the legacy schema will cause the owner's sampler and the non-owner's applier to disagree about which rotation channel is authoritative.
+- Confirm `ItemSync.applyRemoteItemState` writes `mesh.position` / `mesh.rotationQuaternion` via `applyPoseToMesh` and does NOT call `body.setTargetTransform`, `setLinearVelocity`, or `setAngularVelocity` on non-owned bodies. Pre-step sync propagates the mesh channels to the ANIMATED body on the next tick.
+- Confirm no code path writes `mesh.rotation.x/y/z` (Euler) or `mesh.scaling` on any replicated item mesh (Invariants E and P). Legacy "spin in place" animations on collectibles (see `CollectiblesManager.addRotationAnimation`) MUST be quaternion-based (`rotationQuaternion.multiplyInPlace(dq)`) and MUST be gated to massless (`instance.mass === 0`) items so they never conflict with the kinematic apply path.
 
 ### Peers do not see collected items disappear
 Symptom: P1 collects a present; P2's view still shows the present on the floor.
@@ -1141,6 +1148,111 @@ Diagnostic:
 - Reduce throttle times (faster updates)
 - Increase significance thresholds
 - Consider client-side prediction/interpolation
+
+---
+
+## Item Sync: The Stateful Multiplayer Dance
+
+Item synchronization is the most complex stateful interaction in the multiplayer system. The diagrams and explanations below summarize the key invariants that must hold simultaneously for items to appear correctly on all clients. Full normative detail and additional Mermaid diagrams are in [MULTIPLAYER_SYNCH.md Appendix B](MULTIPLAYER_SYNCH.md#appendix-b-item-sync-state-machines-and-interaction-diagrams-implementation-patterns).
+
+### The five simultaneous invariants
+
+For item state to be correct on every client, five conditions must hold simultaneously:
+
+| # | Invariant | Violation symptom |
+|---|-----------|-------------------|
+| 1 | **Pose-only transport on the wire** — `sampleMeshPose` reads `mesh.position` + `mesh.rotationQuaternion` directly and ships them as `{ pos: [3], rot: [4] }`. Scale is never on the wire (it is a static per-client spawn value), and no matrix composition or decomposition runs on sender or receiver. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state) Invariant P and [§B.11](MULTIPLAYER_SYNCH.md#b11-why-the-wire-ships-pos--rot-and-not-a-world-matrix). | Regressions to a 16-float world matrix reintroduce the negative-scale decomposition trap: Babylon's `Matrix.decompose` absorbs a `scaling._x/_z = -1` flip as a `Rot_Y(π)` factor, which then composes with the receiver's own local flip and produces a 180° visual mismatch on collectible presents while the cake (clean positive scale) appears correct. |
+| 2 | **Mesh-direct apply on replicas** — non-owner meshes receive their pose via `applyPoseToMesh` (writes `mesh.position` + `mesh.rotationQuaternion`), **not** via `body.setTargetTransform`. Pre-step sync copies mesh → body before the next physics tick. See [MULTIPLAYER_SYNCH.md §B.9](MULTIPLAYER_SYNCH.md#b9-kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform). | "Whizzing demon" visual (target-transform interpolator retargeted every frame) or invisible replicas stuck at spawn height (interpolator never reaches target). |
+| 3 | **Seed-before-apply** — `seedMotionTypesForEnv` runs before `applyItemSnapshot` | Items render at spawn-scatter height; Havok post-step on the still-`DYNAMIC` body overrides the mesh write with simulated falling position. |
+| 4 | **Auth-before-items** — server sends `env-item-authority-changed` before `item-state-update` in every bootstrap burst | Client cannot determine if it is the resolved owner before motion types are seeded; brief `DYNAMIC` window allows gravity to scatter items before first transform applies. |
+| 5 | **Buffer-not-discard** — `applyItemSnapshot` stores snapshots arriving for the wrong environment in a merged `knownItemStates` map | Late-joiner misses the only bootstrap snapshot; items never appear after environment transition, or only the subset present in the most recent dirty broadcast is positioned. |
+
+**Dirty-filter threshold caveat:** The server's `posEpsilon` / `rotDotThreshold` MUST exceed the Havok idle-jitter amplitude of settled bodies on the owner client (empirically ~5–20 mm translational). Thresholds below the jitter floor produce a continuous stream of dirty rows for an item that is visually at rest — the "whizzing demon" symptom on the replica. See [MULTIPLAYER_SYNCH.md §B.9.4](MULTIPLAYER_SYNCH.md#b94-dirty-filter-thresholds-must-exceed-physics-idle-jitter) for the chosen values and rationale.
+
+### Overview flow: two players, one shared environment
+
+```mermaid
+flowchart LR
+  subgraph P1["P1 (Env-Authority)"]
+    P1_spawn["Item spawns\n(DYNAMIC body)"]
+    P1_settle["Physics settles\nto floor"]
+    P1_sample["Publish tick:\nsampleMeshPose → {pos, rot}"]
+    P1_patch["PATCH item-state-update"]
+  end
+
+  subgraph SRV["Server"]
+    SRV_dirty["Dirty filter\n(posEpsilon = 5e-3, rotDot = 0.99996)"]
+    SRV_cache["Update itemTransformCache"]
+    SRV_bcast["broadcastExcept sender"]
+    SRV_boot["Bootstrap:\npushSnapshotToSession"]
+  end
+
+  subgraph P2["P2 (Late Joiner)"]
+    P2_join["POST /join"]
+    P2_sse["GET /stream → SSE open"]
+    P2_auth["Recv env-item-authority-changed\n→ know P1 is owner"]
+    P2_snap["Recv item-state-update\n(bootstrap)"]
+    P2_check{"currentEnv\n= snapshot env?"}
+    P2_buf["Buffer as\nlastAppliedItemSnapshot"]
+    P2_seed["seedMotionTypesForEnv\n→ all items ANIMATED"]
+    P2_apply["applyItemSnapshot\n→ applyPoseToMesh per item"]
+    P2_live["Live per-tick\nitem-state-update\n→ applyPoseToMesh (see §B.9)"]
+  end
+
+  P1_spawn --> P1_settle --> P1_sample --> P1_patch
+  P1_patch --> SRV_dirty
+  SRV_dirty -- "DIRTY" --> SRV_cache --> SRV_bcast
+
+  P2_join --> P2_sse
+  P2_sse --> SRV_boot
+  SRV_boot -- "① auth signal" --> P2_auth
+  SRV_boot -- "② item snapshot" --> P2_snap
+
+  P2_auth --> P2_check
+  P2_snap --> P2_check
+  P2_check -- "env mismatch" --> P2_buf
+  P2_check -- "env match" --> P2_seed
+
+  P2_buf -- "env loads later" --> P2_seed
+  P2_seed --> P2_apply
+
+  SRV_bcast -- "live updates" --> P2_live
+```
+
+### Client render-loop state machine (condensed)
+
+The client render loop maintains two latched booleans. Both must be `true` before item state is applied to physics bodies:
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> WaitBoth : Join / env load start
+
+  WaitBoth --> GotSnapshot : SSE item-state-update arrives\n(env may not match yet)
+  WaitBoth --> GotEnvReady : isEnvironmentLoaded() → true
+
+  GotSnapshot --> BothReady : isEnvironmentLoaded() = true
+  GotEnvReady --> BothReady : lastAppliedItemSnapshot exists
+
+  BothReady --> Applied : seedMotionTypesForEnv()\nthen applyItemSnapshot()
+
+  Applied --> Applied : new SSE item-state-update\n→ applyItemSnapshot() immediately
+```
+
+### Physics body motion type rules
+
+```
+On env load (any client):              all item bodies → ANIMATED
+On receiving authority (self):         own items      → DYNAMIC
+On losing authority:                   affected items → ANIMATED
+On recv item-state-update (non-owner): mesh-direct write on ANIMATED body
+                                        (applyPoseToMesh; Havok pre-step
+                                         propagates mesh → body)
+On recv item-state-update (owner):     silently ignored
+                                        (owner-pin, no self-echo)
+```
+
+See [Appendix B.4](MULTIPLAYER_SYNCH.md#b4-item-physics-motion-type-lifecycle-per-client) for the full state machine and [Appendix B.9](MULTIPLAYER_SYNCH.md#b9-kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform) for the apply primitive itself.
 
 ---
 

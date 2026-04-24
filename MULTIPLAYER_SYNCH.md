@@ -228,7 +228,7 @@ stateDiagram-v2
 - A client MUST stop publishing rows for `I` within one send-tick of losing resolved ownership — whether because of `item-authority-changed` transferring explicit ownership elsewhere, `env-item-authority-changed` transferring env-authority elsewhere, or its own env switch.
 - A client MUST flip its local physics body motion type for `I` to `DYNAMIC` on becoming resolved owner and to `ANIMATED` (kinematic) on losing resolved ownership. On becoming resolved owner of an item previously held as kinematic, the client MUST atomically clear any queued kinematic interpolation target when flipping to `DYNAMIC` to avoid oscillation between the local simulation and a stale target.
 - **Self-echo suppression (defense-in-depth).** Under conforming server behavior ([§5.2.2](#522-per-client-freshness-matrix) rule 2), the server MUST NOT deliver `item-state-update` rows for `I` to the resolved owner of `I`. Clients MUST additionally drop any such row they receive (e.g., across a reconnection window or ownership-transition race); the resolved owner's local physics is the canonical source of state for `I` and incoming rows MUST NOT be applied.
-- **Non-owner kinematic invariant.** A client that is NOT the resolved owner of `I` MUST keep `I`'s physics body in `ANIMATED` (kinematic) motion type, MUST apply inbound transforms exclusively via kinematic target (e.g., `setTargetTransform`), and MUST NOT apply `setLinearVelocity`, `applyImpulse`, or `addForce` to `I`. Inbound transforms arrive on the wire as a single 4x4 world matrix (Invariant M, [§5.2](#52-item-state)); the receiver MUST decompose this matrix into position + quaternion + scale, discard the scale factor, and pass the position and quaternion to the kinematic-target API. The receiver MUST NOT touch, read, or compose Euler-angle channels on the mesh or physics body as part of this apply path (Invariant E).
+- **Non-owner kinematic invariant.** A client that is NOT the resolved owner of `I` MUST keep `I`'s physics body in `ANIMATED` (kinematic) motion type, MUST apply inbound transforms via mesh-direct writes (see [§B.9](#b9--kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform)), and MUST NOT apply `setLinearVelocity`, `applyImpulse`, or `addForce` to `I`. Inbound transforms arrive on the wire as a pose pair `{ pos, rot }` (Invariant P, [§5.2](#52-item-state)); the receiver MUST write `pos` onto `mesh.position` and `rot` onto `mesh.rotationQuaternion` verbatim (no matrix decomposition, no scale mutation — `mesh.scaling` is a static per-client spawn value and stays untouched). Havok's pre-step sync then copies the mesh channels onto the ANIMATED body before the next physics tick. The receiver MUST NOT touch, read, or compose Euler-angle channels on the mesh or physics body as part of this apply path (Invariant E).
 
 ### 4.8 Environment item authority lifecycle
 
@@ -351,8 +351,8 @@ Every object in `updates` MUST conform to:
 
 **Wire-format invariants (normative).**
 
-- **Invariant M (matrix-only transform).** Each `ItemInstanceState` row carries exactly one transform field: `matrix`, a JSON array of length exactly 16 representing the row-major 4x4 world matrix of the item mesh at sample time (i.e. the output of `mesh.computeWorldMatrix(true).asArray()` in the Babylon.js reference client). Senders MUST NOT include `position`, `rotation`, or `velocity` fields on item rows. Receivers MUST reject rows whose `matrix` is absent, is not an array of length 16, or contains non-finite components; such rows MUST be treated as malformed and ignored ([§7](#7-security-model)).
-- **Invariant E (no Euler on the item wire).** Neither the wire schema nor any client-side sampler/applier for items may reference Euler-angle representations. Rotation, when discussed in the item pipeline, is strictly the unit-quaternion factor obtained by decomposing the world matrix. The `mesh.rotation` Euler channel is not sampled on the owner and not written on the receiver.
+- **Invariant P (pose-only transport).** Each `ItemInstanceState` row carries the item's transform as exactly two fields: `pos`, a JSON array of length 3 (`[x, y, z]`, world-space position in meters), and `rot`, a JSON array of length 4 (`[x, y, z, w]`, unit quaternion). The sender reads these from the mesh's LOCAL channels — `mesh.position` and `mesh.rotationQuaternion` — and the receiver writes them back onto the corresponding channels verbatim, without any matrix composition or decomposition on either end. Every replicated item mesh is unparented (added directly to the scene), so the local `position` and `rotationQuaternion` ARE the world-space pre-scale pose. Scale is NEVER on the wire: each client spawns the mesh with identical local `scaling` from the same `environment.items[*].instances[*].scale` config (negative-sign flips for GLB re-orientation included), and Babylon's TRS pipeline recomposes the world matrix from `pos · rot · scale` locally, so world matrices match across clients without replicating scale. See [§B.11](#b11-why-the-wire-ships-pos--rot-and-not-a-world-matrix) for the post-mortem of why the wire is pose-only and not a 16-float world matrix. Senders MUST NOT include `matrix`, `position`, `rotation` (beyond the unit-quaternion `rot` field), `velocity`, or `scale` fields on item rows. Receivers MUST reject live (non-collected) rows whose `pos` or `rot` is absent, wrong-length, or non-finite; such rows MUST be treated as malformed and ignored ([§7](#7-security-model)). Collection-only rows (`isCollected: true`) MAY omit `pos`/`rot` because the receiver hides the mesh and the transform is irrelevant.
+- **Invariant E (no Euler on the item wire).** Neither the wire schema nor any client-side sampler/applier for items may reference Euler-angle representations. Rotation on the item wire is strictly the unit-quaternion `rot` field. The `mesh.rotation` Euler channel is not sampled on the owner and not written on the receiver.
 
 **Authorized sender (per-row, layered):** Any known client MAY submit this PATCH, but rows are filtered per-element by the **resolved-owner** rule ([§7.5](#75-item-authority-authorization)):
 
@@ -383,11 +383,13 @@ Broadcasting is defined by **three layered filters** applied in order: (1) the g
 
 To reduce compute and bandwidth, servers MUST suppress rebroadcasting item-state rows whose observable state has not changed since the last accepted row for the same `instanceId`. Normative rules:
 
-1. The server maintains a `itemTransformCache` map `{ instanceId → CachedItemTransform }` with the fields of the last accepted `ItemInstanceState` row (`matrix`, `isCollected`, `collectedByClientId`, `ownerClientId`) plus a server `lastBroadcastAt` timestamp. The transform carried by each row is a single 4x4 world matrix (16 floats, row-major) per Invariant M in [§5.2](#52-item-state); the cache stores it by reference/value as a `[16]float64` array.
+1. The server maintains a `itemTransformCache` map `{ instanceId → CachedItemTransform }` with the fields of the last accepted `ItemInstanceState` row (`pos`, `rot`, `isCollected`, `collectedByClientId`, `ownerClientId`) plus a server `lastBroadcastAt` timestamp. Per Invariant P in [§5.2](#52-item-state) the transform is a pose pair; the cache stores it as `[3]float64` and `[4]float64` arrays.
 2. After the resolved-owner filter ([§7.5](#75-item-authority-authorization)) accepts a row, the server MUST compare the incoming row to `itemTransformCache[instanceId]`:
-   - The **matrix field** (`matrix: [16]float64`) is DIRTY iff any of its 16 elements differs from the cached value by more than the configured epsilon (reference tunable: `matrixEpsilon = 1e-4`, unitless — because matrix entries mix distances in meters with direction-cosine unit scalars). Servers MAY expose this tunable as configuration. Servers MUST NOT use separate per-component epsilons (position / rotation / velocity) because velocity and Euler rotation are no longer on the wire (Invariants M and E).
+   - The **pos field** (`pos: [3]float64`, meters) is DIRTY iff any component differs from the cached value by more than `posEpsilon` (reference tunable: `5e-3` = 5 mm, chosen to exceed Havok's settled-body idle jitter while remaining well below character-collision scale; see [§B.9.4](#b9-kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform) / [§B.10](#b10-post-mortem-lessons-from-the-stacked-fix-iteration)).
+   - The **rot field** (`rot: [4]float64`, unit quaternion) is DIRTY iff `|q_new · q_cached| < rotDotThreshold` (reference tunable: `0.99996` ≈ cos(0.5°); compares absolute dot product to handle the quaternion double-cover `q ≡ -q`). This is unit-free and calibrates the rotational noise floor to roughly the same visual significance as `posEpsilon`.
    - **Categorical fields** (`isCollected`, `collectedByClientId`, `ownerClientId`) are DIRTY iff they are not exactly equal to the cached value.
    - If no cache entry exists for `instanceId` (first accepted row), the row is unconditionally DIRTY.
+   - Servers MUST NOT use a separate velocity epsilon — velocity is not on the wire (Invariant P).
 3. If the row is CLEAN (every field within epsilon / equal), the server MUST:
    - Refresh `lastUpdatedAt` on the `itemOwners` entry when applicable (per *Activity side effects* above), and
    - Drop the row from the outgoing fan-out. The row MUST NOT contribute to any `item-state-update` broadcast ([§6.2](#62-item-state-update)), and MUST NOT update freshness cells per [§5.2.2](#522-per-client-freshness-matrix).
@@ -587,7 +589,7 @@ Signals are JSON objects. Field names below use **camelCase** unless explicitly 
 
    **Remote-collect feedback parity.** Additionally, when a receiver processes a `collections[]` entry for an `I` whose local representation is still present at the moment the entry arrives, the receiver MUST play the same visual-and-audio collection feedback as the collector — specifically (a) the collection particle burst emitted at `I`'s last-known world position, and (b) the collection sound spatialized at that position (subject to distance attenuation from the local listener). Receivers MUST NOT emit scoring side-effects of any kind in response to a remote collection: no currency credit, no inventory mutation, no achievement progress, no analytics "collected by self" event. Those side-effects are the collector's exclusive responsibility. When `I`'s local representation is already gone at arrival time (previous bootstrap snapshot or previously applied collection), the receiver SHOULD NOT emit feedback — the event is an idempotent reconciliation and has no user-facing position to anchor the VFX to.
 2. **Self-echo drop (defense-in-depth).** Receivers MUST drop any `updates[]` row whose `instanceId = I` the receiver currently resolves as **self-owned** (self is the explicit owner per [§4.7](#47-item-authority-lifecycle), or no explicit owner exists and self is `envAuthority[E]` per [§4.8](#48-environment-item-authority-lifecycle)). Under conforming server behavior such rows MUST NOT be transmitted ([§5.2.2](#522-per-client-freshness-matrix) rule 2); this receiver rule is required as defense-in-depth for reconnect windows, ownership-transition races, and cross-version server deployments.
-3. **Non-owner kinematic apply.** For every `updates[]` row whose `instanceId = I` the receiver resolves as NOT self-owned, the receiver MUST apply the row's transform to `I`'s local physics body via the kinematic path. The row carries exactly one transform field: `matrix: [16]float64` (row-major 4x4 world matrix, Invariant M). The receiver MUST decompose the matrix into `(scale, quaternion, position)`, discard `scale`, and call `body.setTargetTransform(position, quaternion)` (or the equivalent interpolated-target API). The receiver MUST keep `I`'s body in `ANIMATED` motion type and MUST NOT call `setLinearVelocity`, `applyImpulse`, or `addForce` on `I` in response to the row. The receiver MUST NOT read or write Euler-angle channels (`mesh.rotation.x/y/z`) on `I` as part of the apply path (Invariant E). Because the wire carries no velocity field, receivers MUST NOT attempt velocity-based extrapolation between discrete targets; the kinematic target cadence is the sole source of motion for non-owned bodies.
+3. **Non-owner kinematic apply.** For every `updates[]` row whose `instanceId = I` the receiver resolves as NOT self-owned, the receiver MUST apply the row's transform to `I`'s mesh via the mesh-direct kinematic path ([§B.9](#b9-kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform)). The row carries exactly two transform fields: `pos: [3]float64` and `rot: [4]float64` (unit quaternion, Invariant P). The receiver MUST write `pos` onto `mesh.position` and `rot` onto `mesh.rotationQuaternion` verbatim — no matrix composition, no `setTargetTransform` call, and no mutation of `mesh.scaling` (static per-client spawn value). Havok's pre-step sync (`disablePreStep = false`, the default) then copies the mesh channels onto the ANIMATED body before the next physics tick, so collision queries see the correct pose without any interpolation surprises. The receiver MUST keep `I`'s body in `ANIMATED` motion type and MUST NOT call `setLinearVelocity`, `applyImpulse`, or `addForce` on `I` in response to the row. The receiver MUST NOT read or write Euler-angle channels (`mesh.rotation.x/y/z`) on `I` as part of the apply path (Invariant E). Because the wire carries no velocity field, receivers MUST NOT attempt velocity-based extrapolation between discrete targets; the mesh-direct write cadence is the sole source of motion for non-owned bodies.
 4. **Env-entry seeding (ANIMATED-default-then-promote).** On environment entry (initial join, env-switch, or SSE reconnect), the receiver MUST seed **every** item `I` in the arriving environment `E` to the non-owner state — `PhysicsMotionType.ANIMATED` (kinematic) — **before starting or resuming its local physics loop for `E`**. The receiver MUST NOT promote any `I` to `DYNAMIC` on the basis of ambient local state, optimistic self-claim, or absence of authority data. Promotion to `DYNAMIC` is permitted **only** after the receiver has applied an explicit authority signal naming self as the resolved owner of `I`: the authority snapshot delivered on SSE open ([§4.5](#45-client-sse-session-model)), an `item-authority-changed` claiming `I` for self ([§4.7](#47-item-authority-lifecycle)), or an `env-item-authority-changed` naming self as `envAuthority[E]` while `I` has no explicit owner ([§4.8](#48-environment-item-authority-lifecycle)). A receiver that has entered `E` but has not yet applied any authority signal for `E` is, by definition, a non-owner of every `I` in `E`.
 5. **Motion-type re-evaluation.** Receivers MUST re-derive the motion type for every `I` in the currently loaded environment from the authority tracker **immediately** (before the next physics tick) on each of the following triggers:
    a. Application of an `item-authority-changed` signal for `I`.
@@ -739,7 +741,7 @@ Normative semantics are defined by this document. The project maintains parallel
 
 ### 8.2 `ItemInstanceState` and `ItemCollectionEvent`
 
-As defined in [`src/client/types/multiplayer.ts`](src/client/types/multiplayer.ts): instance identity (`instanceId`, `itemName`), a single transform field `matrix: readonly number[]` of length exactly 16 (row-major 4x4 world matrix produced by `mesh.computeWorldMatrix(true).asArray()`; Invariant M), collection flags (`isCollected`, `collectedByClientId`), optional `ownerClientId`, and `timestamp`. The schema MUST NOT carry `position`, `rotation` (Euler or quaternion), or `velocity` as separate fields — non-owners reconstruct the pose by decomposing the matrix locally (Invariants M and E).
+As defined in [`src/client/types/multiplayer.ts`](src/client/types/multiplayer.ts): instance identity (`instanceId`, `itemName`), pose fields `pos: [number, number, number]` (world-space position) and `rot: [number, number, number, number]` (unit quaternion) — Invariant P — collection flags (`isCollected`, `collectedByClientId`), optional `ownerClientId`, and `timestamp`. The schema MUST NOT carry `matrix`, `velocity`, `scale`, or Euler rotation as separate fields (Invariants P and E).
 
 `ItemInstanceState` additionally carries an OPTIONAL `ownerClientId?: string` field. When present it MUST equal the `ownerClientId` that the server has recorded for `instanceId` in its `itemOwners` map ([§4.7](#47-item-authority-lifecycle)). The server MUST populate this field on outbound `item-state-update` rows for dynamic items when it has a known owner; it MUST omit it (or set to `null`) for collectible rows and for dynamic rows that are momentarily unowned (e.g., after a disconnect release that is about to be reclaimed).
 
@@ -947,3 +949,421 @@ Until any of the above features is required, boolean cells are strictly sufficie
 | Activity tracking (`itemOwners.lastUpdatedAt`) refreshed even for CLEAN rows that are dropped from broadcast ([§5.2.1](#521-global-dirty-filter-server-side-transform-cache)) | Pending |
 
 This appendix is informative; normative text is in sections [§1](#conformance)–[§9](#9-operational-requirements-development-proxies).
+
+---
+
+## Appendix B. Item-sync state machines and interaction diagrams (implementation patterns)
+
+This appendix captures the **runtime interaction patterns** that govern how item state flows between players in the presence of multi-environment joins, deferred bootstraps, physics motion-type seeding, and the publish gate. All diagrams are derived from the RV Life environment test cases. This appendix is **informative**; normative rules are in §4–§7.
+
+---
+
+### B.1 Full happy-path join (same environment)
+
+The simplest case: P2 joins while P1 is already active in the same environment. Authority bootstrap, motion-type seeding, and item snapshot all arrive within the same SSE burst.
+
+```mermaid
+sequenceDiagram
+  participant P1 as P1 (Env-Authority)
+  participant S  as Server
+  participant P2 as P2 (Late Joiner)
+
+  P2->>S: POST /join  {environment_name: "RV Life"}
+  S-->>P2: {client_id, session_id, is_synchronizer}
+
+  P2->>S: GET /stream?sid=…
+  S-->>P2: SSE open
+
+  Note over S,P2: Bootstrap burst (ordered)
+  S-->>P2: signal env-item-authority-changed  {clientId: P1, environmentName: "RV Life"}
+  S-->>P2: signal item-state-update  {updates: [...16-float matrices...]}
+
+  Note over P2: seedMotionTypesForEnv("RV Life")<br/>→ every item body → ANIMATED
+  Note over P2: applyItemSnapshot(snapshot)<br/>→ applyPoseToMesh per item (see §B.9)
+
+  loop Every tick (P1 is env-authority)
+    P1->>S: PATCH item-state-update  {rows: [...dirty rows...]}
+    S-->>P2: signal item-state-update  {updates: [...]}
+    Note over P2: applyRemoteConfiguredItemState<br/>→ applyPoseToMesh on ANIMATED body
+  end
+```
+
+**Critical ordering constraint:** The server MUST send `env-item-authority-changed` before `item-state-update` in the bootstrap burst. If the item snapshot arrives first, the client cannot yet decide ownership, so motion types are seeded without knowing which items will be owned locally — producing a brief `DYNAMIC` window during which Havok gravity can scatter items before the first transform applies. Under the mesh-direct apply pattern ([§B.9](#b9-kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform)), the mesh write itself will succeed on a `DYNAMIC` body, but the body's post-step will immediately override it with simulated position and the replica will still drift. The ordering contract is therefore about authority resolution, not about the apply primitive.
+
+---
+
+### B.2 Late-joiner multi-environment bootstrap (deferred apply)
+
+The common real-world case: P2's browser opens in a different environment (e.g. "Mansion") before switching to the shared one ("RV Life"). The item snapshot arrives while P2 is still in the wrong environment, so it must be **buffered and replayed** after the environment transition completes.
+
+```mermaid
+stateDiagram-v2
+  direction LR
+
+  [*] --> WaitingForSSE : P2 joins
+
+  WaitingForSSE --> AuthReceived : SSE burst\nenv-item-authority-changed\n(RV Life, owner=P1)
+
+  AuthReceived --> SnapshotBuffered : SSE burst\nitem-state-update arrives\nbut currentEnv = "Mansion"\n→ dropped by env-mismatch guard\n→ stored as lastAppliedItemSnapshot
+
+  SnapshotBuffered --> EnvLoading : User navigates to RV Life\nenvironment assets begin loading
+
+  EnvLoading --> EnvReady : sceneManager.isEnvironmentLoaded() = true\ncurrentEnvironmentName = "RV Life"
+
+  EnvReady --> MotionSeeded : seedMotionTypesForEnv("RV Life")\nall item bodies → ANIMATED
+
+  MotionSeeded --> SnapshotApplied : applyItemSnapshot(lastAppliedItemSnapshot)\napplyPoseToMesh per item\n(bodies are now ANIMATED ✓)
+
+  SnapshotApplied --> LiveSync : Ongoing item-state-update\nper-tick from P1 via server
+  LiveSync --> LiveSync : applyRemoteConfiguredItemState\nenv check passes\napplyPoseToMesh
+```
+
+**Key invariant — seed-before-apply:** `seedMotionTypesForEnv` MUST be called before `applyItemSnapshot`. If the order is reversed, the mesh-direct write still writes the correct pose, but Havok's post-step on the still-`DYNAMIC` body immediately replaces it with the simulated (falling) pose. The items then drift under gravity regardless of the server-provided pose. See [§B.9](#b9-kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform) for the apply primitive itself.
+
+**Key invariant — buffer-not-discard:** When `applyItemSnapshot` encounters `parsed.envName !== currentEnvironmentName`, it MUST store the snapshot in `lastAppliedItemSnapshot` (or equivalent) rather than discarding it. Without this buffer, P2 never re-applies the snapshot once the correct environment loads.
+
+---
+
+### B.3 Render-loop bootstrap state machine (client-side)
+
+The client runs a render-loop observer that tracks two boolean flags — `lastEnvironmentLoaded` and `lastAppliedItemSnapshot` — to decide when to trigger deferred operations. The four branches encode the env-ready / snapshot-ready cross-product.
+
+```mermaid
+flowchart TD
+  A([Render tick]) --> B{envLoaded\nchanged?}
+
+  B -- "false→true\n(env just loaded)" --> C[seedMotionTypesForEnv]
+  C --> D{lastApplied\nItemSnapshot?}
+  D -- yes --> E[applyItemSnapshot\nlastAppliedItemSnapshot]
+  D -- no --> F([wait for SSE snapshot])
+
+  B -- "true→false\n(env unloaded)" --> G[lastEnvironmentLoaded = false]
+
+  B -- no change --> H{new SSE\nsnapshot\narrived?}
+  H -- yes + envLoaded --> I[applyItemSnapshot\nnew snapshot]
+  H -- "yes + NOT envLoaded" --> J[buffer as\nlastAppliedItemSnapshot]
+  H -- no --> K([idle])
+```
+
+This state machine lives in `multiplayer_bootstrap.ts` inside the Babylon render-loop observer. The two flags form a two-cell latch: once both `envLoaded = true` **and** `snapshotAvailable = true`, the apply fires exactly once (per snapshot version), then waits for the next server push.
+
+---
+
+### B.4 Item physics motion-type lifecycle per client
+
+Each item's physics body transitions through `ANIMATED` (kinematic, server-driven) and `DYNAMIC` (local simulation) based on the resolved ownership state. The diagram below shows the full lifecycle from spawn to post-collection.
+
+```mermaid
+stateDiagram-v2
+  direction TB
+
+  [*] --> Spawned : Environment loads\nitem instantiated by scene
+
+  Spawned --> Animated : seedMotionTypesForEnv\n(all items → ANIMATED\nregardless of ownership)
+
+  Animated --> Dynamic : Resolved owner = self\n(env-authority OR explicit claim)\nsetMotionType(DYNAMIC)
+
+  Dynamic --> Animated : Resolved owner ≠ self\n(authority changed away)\nsetMotionType(ANIMATED)
+
+  Animated --> Animated : applyRemoteConfiguredItemState\napplyPoseToMesh(pos, rot)\n[pre-step syncs mesh→body; see B.9]
+
+  Dynamic --> Publishing : Every publish tick\nincludeRow → true\nPATCH item-state-update
+
+  Publishing --> Dynamic : tick completes
+
+  Dynamic --> Collected : collectedBy = self\nOR remote collection event
+  Animated --> Collected : remote collection signal received
+
+  Collected --> [*] : item removed from scene
+```
+
+**Motion-type authority rule:** `DYNAMIC` is only correct when the client IS the resolved owner. A client that receives a remote `item-state-update` for an item it does not own MUST NOT flip that item to `DYNAMIC`; it MUST apply the transform kinematically by **writing the mesh transform directly** on the `ANIMATED` body (see [§B.9](#b9-kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform) for why `setTargetTransform` is not the right primitive for replicas).
+
+---
+
+### B.5 Server-side item state publish gate
+
+The server runs two independent filters before broadcasting any row from a `PATCH item-state-update` request.
+
+```mermaid
+flowchart TD
+  A([Incoming PATCH\nitem-state-update]) --> B[Parse rows]
+
+  B --> C{For each row}
+
+  C --> D{Sender is\nresolved owner?}
+  D -- no --> DROP1[Drop row\nsilently]
+
+  D -- yes --> E{Dirty filter:\nany field changed\nbeyond epsilon?}
+  E -- "CLEAN\n(all fields within ε)" --> CLEAN[Update lastUpdatedAt\nno broadcast]
+  E -- "DIRTY\n(≥1 field changed)" --> F[Update itemTransformCache\nstamp ownerClientId]
+
+  F --> G[broadcastExcept sender\nsignal item-state-update]
+
+  G --> H{For each\nconnected peer}
+  H --> I{Peer in same\nenvironmentName?}
+  I -- no --> SKIP[Skip peer\n(AOI filter)]
+  I -- yes --> J{freshness\ncell = fresh?}
+  J -- "fresh\n(owner-pin)" --> SKIP2[Skip\n(owner never\nreceives own echo)]
+  J -- stale --> K[Enqueue row\nfor peer SSE]
+  K --> L[Mark cell fresh]
+```
+
+**Owner-pin invariant:** The resolved owner's freshness cell is permanently set to `fresh` for every item it owns. This means the server never echoes an item's own state back to its owner — preventing the owner from fighting its own physics simulation.
+
+**Dirty filter thresholds:** Two independent comparators run per accepted row — a per-component `posEpsilon` (meters) on the pos field and a quaternion-dot-product threshold `rotDotThreshold` on the rot field. Items at rest that have not physically moved will not generate any broadcast traffic even if the owner continues to tick the publish loop. Both thresholds MUST exceed the Havok idle-jitter amplitude for settled bodies (empirically O(10 mm) translational); see [§B.9.4](#b94-dirty-filter-epsilon-must-exceed-physics-idle-jitter) for how to choose their values.
+
+---
+
+### B.6 Bootstrap sequencing: server-side ordering contract
+
+The server must emit signals in a specific order during bootstrap to guarantee the client can apply item state correctly. Out-of-order delivery causes the seed-before-apply invariant to be violated.
+
+```mermaid
+sequenceDiagram
+  participant S  as Server (handleSSE)
+  participant C  as Joining Client
+
+  Note over S: pushSnapshotToSession begins
+
+  S-->>C: signal client-joined  (own session)
+  S-->>C: signal client-joined  (for each existing peer)
+  S-->>C: signal synchronizer-changed  (current base sync)
+
+  Note over S,C: ① Authority BEFORE items
+  S-->>C: signal env-item-authority-changed  {clientId: envAuthority, environmentName}
+  Note over S,C: ② Items AFTER authority (so client knows\nwhether it is the resolved owner\nbefore motion types are seeded)
+  S-->>C: signal item-state-update  {updates: all cached rows for env}
+
+  S-->>C: signal item-authority-changed  (per explicit item owner)
+  S-->>C: signal character-state-update  (per existing peer avatar)
+  S-->>C: signal effects-state-update
+  S-->>C: signal lights-state-update
+  S-->>C: signal sky-effects-state-update
+```
+
+If `item-state-update` arrives before `env-item-authority-changed`, the client cannot yet determine whether it is the resolved owner for the environment. It seeds all items to `ANIMATED` (the safe default) and then calls `applyItemSnapshot`, but once the authority signal arrives later and says "you ARE the env-authority", the client must flip the items to `DYNAMIC` **after** the positions have already been applied. This means the items start at the server-cached positions (correct) but then fall under local physics immediately, which is also correct — but only because the seeding happened first. To avoid any window where the ordering is ambiguous, the server MUST send authority first.
+
+---
+
+### B.7 Environment-switch authority handoff
+
+When a client switches environments the server must atomically transfer env-authority for the abandoned environment to the next arrival in the FIFO list, then assign authority in the new environment.
+
+```mermaid
+sequenceDiagram
+  participant P1  as P1 (leaving "Mansion")
+  participant S   as Server
+  participant P2  as P2 (in "Mansion")
+  participant P3  as P3 (in "RV Life")
+
+  P1->>S: POST /env-switch  {from: "Mansion", to: "RV Life"}
+
+  Note over S: Remove P1 from Mansion arrival order
+  Note over S: envAuthority["Mansion"] was P1 → promote P2 (next in FIFO)
+  S-->>P2: signal env-item-authority-changed  {clientId: P2, environmentName: "Mansion", reason: "env_switch"}
+  S-->>P1: signal env-item-authority-changed  {clientId: P2, environmentName: "Mansion", reason: "env_switch"}
+
+  Note over S: Add P1 to RV Life arrival order
+  Note over S: envAuthority["RV Life"] was P3 → unchanged (P3 arrived first)
+  S-->>P3: signal env-item-authority-changed  {clientId: P3, environmentName: "RV Life"}  (no-op, same owner)
+  S-->>P1: signal env-item-authority-changed  {clientId: P3, environmentName: "RV Life"}
+
+  Note over P1: Resolved owner for RV Life items = P3\n→ seed RV Life items to ANIMATED\n→ await bootstrap item-state-update
+
+  Note over P2: Now env-authority for Mansion\n→ flip Mansion items to DYNAMIC\n→ begin publishing
+```
+
+**`reason` field semantics:** When an env-authority transition is caused by an environment switch (not a disconnect), the signal carries `reason: "env_switch"`. This allows the departing client to distinguish "I left" from "I was disconnected" and handle any client-side cleanup differently.
+
+---
+
+### B.8 Item publish-gate: client-side includeRow decision
+
+Before sending any row in a `PATCH item-state-update`, the client evaluates three conditions in sequence.
+
+```mermaid
+flowchart TD
+  A([Publish tick]) --> B{isSnapshotApplied?\n(env fully loaded +\nbootstrap applied)}
+  B -- no --> SKIP1[Skip all rows\nuntil bootstrap completes]
+
+  B -- yes --> C{For each item\nin environment}
+
+  C --> D{isOwnedBySelf?\n(resolvedOwner = selfClientId)}
+  D -- no --> SKIP2[Skip row\nnot our authority]
+
+  D -- yes --> E{Item collected\nby self?}
+  E -- yes --> COLLECTION[Emit collection event\nin separate channel]
+
+  E -- no --> F[sampleMeshPose(mesh)\n→ pos[3] + rot[4]]
+  F --> G[Append row to\nPATCH payload]
+
+  G --> H{Any rows\nin payload?}
+  H -- no --> SKIP3[No PATCH sent\nthis tick]
+  H -- yes --> I[PATCH /api/multiplayer/item-state-update]
+```
+
+**`isSnapshotApplied` gate:** This is the most important client-side guard. Without it, the client would begin publishing item state before it has received the bootstrap snapshot — flooding the server with the local physics spawn-scatter positions rather than the authoritative settled positions from P1. This is particularly important for the env-authority client itself: it must not publish until it has confirmed what state the server already knows.
+
+**Self-echo guard (complementary server-side rule):** Even if a row passes the `isOwnedBySelf` check and reaches the server, the server will not echo it back to the sender (owner-pin invariant, [§5.2.2](#522-per-client-freshness-matrix) rule 2). The client-side `includeRow` guard and the server-side owner-pin together form a double barrier against phantom state loops.
+
+---
+
+### B.9 Kinematic apply pattern: mesh-direct writes vs `setTargetTransform`
+
+This section explains the **canonical Babylon+Havok kinematic pattern** used by the non-owner apply path, and why an earlier design using `PhysicsBody.setTargetTransform` had to be replaced with mesh-direct writes.
+
+#### B.9.1 The flawed design (historical, replaced)
+
+The first implementation of `ItemSync.applyRemoteItemState` drove non-owner bodies via `body.setTargetTransform(pos, rot)` on an `ANIMATED` body. To stop Havok's pre-step sync from overwriting the body position with the (stale) mesh spawn position, `body.disablePreStep = true` was set alongside the motion-type flip.
+
+This stack layered three fragile mechanisms on top of each other:
+
+1. `setMotionType(ANIMATED)` — marks the body as kinematic.
+2. `disablePreStep = true` — skips the mesh → body sync that would otherwise snap the body back to spawn.
+3. `setTargetTransform(pos, rot)` — requests that the body interpolate to the given world pose over subsequent physics steps.
+
+Observed failures from this stack:
+
+- **"Whizzing demon" symptom:** When an owner body fails to physically settle (floor-contact jitter ≥ `posEpsilon`), every physics tick produces a dirty row. Peers receive a burst of `setTargetTransform` calls. Each new call replaces the previous target before the kinematic interpolator has had time to reach it, causing visible erratic motion on the replica.
+- **"Invisible replica" symptom:** With `disablePreStep = true`, the mesh's `position` / `rotationQuaternion` properties are no longer authoritative — the body is. But the Havok integrator only nudges the body **toward** the target; it does not teleport. For large spawn-height-to-settled-floor jumps, the mesh can linger mid-air or remain invisible depending on the interpolator's cutoff.
+- **Ordering brittleness:** `setTargetTransform` is silently ignored on `DYNAMIC` bodies. Any code path that applied a snapshot before motion types were seeded (or on a body whose authority flipped back to self between seed and apply) saw a no-op — hence the multi-layer seed-before-apply / re-apply / idempotent-safety-net scaffolding around it.
+
+#### B.9.2 The canonical Babylon+Havok pattern (current design)
+
+The correct primitive for driving a **network replica** of a remote-authoritative item is **mesh-direct writes**, not the physics body's target-transform API. Specifically:
+
+1. The body's motion type is `ANIMATED` (kinematic). This stops Havok from integrating forces on it.
+2. `disablePreStep` remains at its default `false`.
+3. The snapshot applier writes the wire pose directly onto the mesh via `mesh.position.set(px, py, pz)` + `mesh.rotationQuaternion.set(rx, ry, rz, rw)` — i.e. the `applyPoseToMesh` helper.
+4. On the next physics tick, Havok's pre-step sync copies `mesh.position` + `mesh.rotationQuaternion` → body. The body now has the correct pose for this step's collision resolution.
+5. Because the body is `ANIMATED`, the post-step does not move it.
+
+This pattern is **exactly one frame's latency**, deterministic, and requires none of `setTargetTransform`, `disablePreStep`, or the "interpolation has finished" assumptions that gave us the fragile prior design. It works identically for `collectibles_manager` items (presents, cake) and `environment_physics_sync` items (environment physics objects) because the mesh is the authoritative pose source in both cases when the body is `ANIMATED`.
+
+```mermaid
+flowchart LR
+  A["SSE item-state-update<br/>row.pos, row.rot"] --> B{Body exists &<br/>ANIMATED?}
+  B -- no --> FALLBACK["applyPoseToMesh<br/>(mesh write, no body)"]
+  B -- yes --> WRITE["applyPoseToMesh<br/>mesh.position &amp; rotationQuaternion"]
+  WRITE --> PRE[Next Havok tick:<br/>pre-step copies mesh → body]
+  PRE --> POST[Physics step:<br/>ANIMATED body is not integrated]
+  POST --> RENDER[Render:<br/>mesh already at correct pose]
+  FALLBACK --> RENDER
+```
+
+> **Invariant — non-owner apply path:** the non-owner `applyRemoteItemState` path **MUST NOT** call `setTargetTransform`, **MUST NOT** manipulate `body.disablePreStep`, and **MUST NOT** write any linear or angular velocity. It writes only `mesh.position` and `mesh.rotationQuaternion` (via `applyPoseToMesh`), and visibility via `mesh.isVisible` / `mesh.setEnabled` for collection. `mesh.scaling` is never written — it is a static per-client spawn value (see [§B.11](#b11-why-the-wire-ships-pos--rot-and-not-a-world-matrix)).
+
+> **Invariant — DYNAMIC bodies are never targeted by remote state.** If `applyRemoteItemState` finds the body in `DYNAMIC` motion type, it MUST short-circuit. A `DYNAMIC` motion type means the local client is the resolved owner; receiving a remote snapshot for an item we own signals an authority mis-routing and any write would compete with the local simulation.
+
+#### B.9.3 Why `setTargetTransform` is not the right primitive
+
+`PhysicsBody.setTargetTransform` is designed for **authored kinematic animation** — e.g. driving a moving platform through its keyframe path with Havok-consistent collision resolution along the way. It assumes: (a) continuous small deltas, not teleports; (b) no mid-flight retarget every frame; and (c) exclusive authorship of the target over the interpolation window.
+
+The multiplayer replica case violates all three:
+- Deltas include single-frame teleports (bootstrap, environment re-entry, owner flip).
+- Target retargets happen every received SSE update, potentially every tick.
+- The *server-side dirty filter* rather than a local animator decides when a new target appears.
+
+Using `setTargetTransform` for replicas is therefore fighting the engine. The mesh-direct write is what the engine is built to handle cleanly.
+
+#### B.9.4 Dirty-filter thresholds must exceed physics idle-jitter
+
+The server-side dirty filter (§5.2.1) rejects rows whose pose is within `posEpsilon` / `rotDotThreshold` of the last cached value. Both thresholds **MUST exceed the idle-jitter amplitude** of the physics engine on the owner client. Havok's default sleep threshold + finite contact-solver iteration tolerances produce small but non-zero per-frame drift (empirically O(10 mm) translational for a stacked collectible on a static floor, depending on mass / friction / restitution / timestep). A `posEpsilon` of `1e-4` (0.1 mm) is below that noise floor, causing a single idle item to generate a dirty row every tick — which the server then flood-broadcasts — which on the replica looks like the "whizzing demon" symptom even after the apply-path fix.
+
+Recommended values:
+- `posEpsilon`: lower bound `5e-3` (5 mm); upper bound the visual-tolerance threshold for 1 m-scale items (~1–2 cm). MUST be above the owner's idle-jitter and SHOULD be well below the player-character body radius so that a claimed item's motion remains perceptible on replicas.
+- `rotDotThreshold`: `0.99996` (≈ cos(0.5°)). The dot product of successive unit quaternions is unit-free; `0.99996` corresponds to roughly a 0.5° rotational delta, which matches the visual significance of the recommended `posEpsilon`. The comparator uses `|dot|` so that the double-cover identity `q ≡ -q` is honored.
+
+The exact values are implementation-dependent but both MUST track the owner's physics noise floor together — a tight pos threshold paired with a loose rot threshold (or vice versa) produces asymmetric flooding on one axis only.
+
+#### B.9.5 Concrete call chain on the non-owner apply path
+
+```mermaid
+sequenceDiagram
+  participant SRV as Server
+  participant MP as MultiplayerManager (P2)
+  participant BS as multiplayer_bootstrap
+  participant CIS as configured_items_sync
+  participant IS as ItemSync
+  participant MESH as Babylon mesh (P2)
+  participant HK as Havok pre-step
+  participant BODY as PhysicsBody (ANIMATED)
+
+  SRV-->>MP: SSE signal item-state-update { updates: [...] }
+  MP->>BS: emit 'item-state-update'
+  BS->>BS: knownItemStates.set(instanceId, row)
+  BS->>BS: applyItemSnapshot(msg)
+  BS->>CIS: applyRemoteConfiguredItemState(envName, row)
+  CIS->>CIS: parseEnvScopedInstanceId(row.instanceId) — env check
+  CIS->>IS: ItemSync.applyRemoteItemState(mesh, row, body?)
+  IS->>IS: if body && body.motionType === DYNAMIC → return
+  IS->>IS: applyPoseToMesh(mesh, { pos: row.pos, rot: row.rot })
+  IS->>MESH: mesh.position.set(px, py, pz)
+  IS->>MESH: mesh.rotationQuaternion.set(rx, ry, rz, rw)
+  Note over MESH: collection flip (if row.isCollected)<br/>mesh.isVisible / setEnabled
+  Note over HK,BODY: Next scene.onBeforeRenderObservable tick
+  HK->>BODY: pre-step sync mesh → body<br/>(disablePreStep = false, default)
+  HK->>HK: physics step — ANIMATED body not integrated
+  HK->>MESH: post-step no-op for ANIMATED
+```
+
+This trace supersedes the earlier `setTargetTransform` path throughout Appendix B. Read B.1 through B.8 with "setTargetTransform on ANIMATED body" mentally substituted by "mesh-direct write; Havok pre-step propagates to body".
+
+---
+
+### B.10 Post-mortem: lessons from the stacked-fix iteration
+
+For future developers touching this code, the following lessons distilled from the iterative debugging sessions that produced Appendix B are recorded here as guardrails:
+
+1. **Prefer the engine's canonical primitive.** When a multiplayer replica needs a pose applied, the canonical Babylon primitive is to write the mesh transform; the physics plugin handles the rest. Do not reach for physics APIs (`setTargetTransform`, `setPositionAndRotation`, `setMotionType` + `disablePreStep` toggles) unless the canonical path demonstrably cannot express the intent.
+2. **Fragility compounds.** Each fix in the pre-B.9 sequence (seed-before-apply → re-apply on items-ready → `knownItemStates` merge → delayed re-snapshot → `disablePreStep`) compensated for a symptom whose root cause was the wrong primitive. A single fix at the primitive level (B.9) obsoletes several of them as correctness-critical (they remain as defense-in-depth).
+3. **Tune the dirty filter to the physics noise floor, not to the idealized asset metadata.** `posEpsilon` / `rotDotThreshold` are runtime-physics thresholds, not logical-equality thresholds. They should be set by measuring empirical settle jitter, not by how many digits of precision look "meaningful" in a pose sample.
+4. **A visibly correct bootstrap does not imply a robust apply path.** The original `setTargetTransform` implementation passed early happy-path tests when all items were small deltas from their spawn positions. The "whizzing demon" and "invisible cake" failures surfaced only once physics actually ran long enough to produce a settled state far from the authored spawn — i.e. once real gameplay timing was exercised.
+5. **Authoritative logs beat theorizing.** The combination of `[SYNC_DEBUG]` (per-apply decisions), `[SYNC_GATE]` (periodic publish-gate summary), and server-side `[Broadcast]` / `[ItemState]` logs was what finally localized the bug to the apply path rather than to authority, bootstrap, or the dirty filter. Retain these logs (even at elevated verbosity) during any future reshuffling of this subsystem.
+
+### B.11 Why the wire ships pos + rot and not a world matrix
+
+**Historical context.** Earlier revisions of this protocol placed a full 4x4 world matrix on the item wire (16 floats per row; the unmodified output of `mesh.computeWorldMatrix(true).asArray()`). The receiver decomposed it via `Matrix.decomposeToTransformNode(mesh)` and wrote the resulting `position`, `rotationQuaternion`, **and** `scaling` back onto the mesh. That pipeline produced a family of correctness and efficiency problems that all resolve cleanly when the wire carries `{ pos, rot }` instead. This appendix records the problems, the decision, and the rationale so a future contributor cannot accidentally re-introduce the matrix pipeline.
+
+**Problem 1 — the negative-scale decomposition trap.** `Matrix.decompose` is not a one-to-one inverse of `Matrix.Compose`. A scale of `(-s, s, -s)` is algebraically equivalent to a rotation of 180° about the world Y axis combined with a positive uniform scale:
+
+```
+diag(-s, s, -s)  ==  Rot_Y(π) · diag(s, s, s)
+```
+
+So a world matrix `M = T · R_author · diag(-s, s, -s)` factors **two** valid ways:
+
+| factoring | scale returned | rotation returned |
+| --- | --- | --- |
+| sign-in-scale | `(-s, s, -s)` | `R_author` |
+| sign-absorbed | `(s, s, s)` | `R_author · Rot_Y(π)` |
+
+Babylon's decomposer is free to choose either, and empirically returns the sign-absorbed factoring. `CollectiblesManager.createCollectibleInstance` explicitly sets `meshInstance.scaling._x *= -1; meshInstance.scaling._z *= -1` on every spawned present to re-orient the authored GLB root. When the sender shipped `M` on the wire and the receiver decomposed it, the replica rendered with subtly wrong orientations on non-owner clients while the cake (positive uniform scale) synced correctly. Writing the full TRS triple on the receiver fixes the world transform but forces the replica to overwrite its own authored `mesh.scaling`, which is itself a design smell: the scale is static config, not sync-relevant state.
+
+**Problem 2 — bandwidth.** A 16-float matrix JSON-encodes to roughly 130–180 bytes per row; `{ pos: [3], rot: [4] }` is roughly 60–85 bytes — a ~55% reduction on every accepted dirty row, compounded across every item in every broadcast fan-out.
+
+**Problem 3 — CPU.** On the sender, sampling a world matrix requires `computeWorldMatrix(true)` (which walks the node graph even when the mesh is unparented, because Babylon pessimistically recomputes). On the receiver, `decomposeToTransformNode` performs three square roots for the scale factors plus a quaternion extraction from the rotation block. Both are unnecessary when the mesh is unparented: `mesh.position` already IS the world position and `mesh.rotationQuaternion` already IS the pre-scale rotation. Replacing matrix sampling with direct channel reads and matrix decomposition with direct channel writes is strictly cheaper and avoids an entire class of floating-point reconstruction error.
+
+**Problem 4 — dirty-filter noise.** Matrix entries mix distance scalars (column 3) with direction-cosine scalars (columns 0–2). A single element-wise epsilon cannot express the physically meaningful thresholds "≥ 5 mm of translation" OR "≥ 0.5° of rotation" without either false negatives at the rotational noise floor (the sender re-publishes a row for sub-millidegree jitter) or false positives at the translational noise floor (the sender drops a visible translation because a single direction-cosine happened to stay inside epsilon). Separate per-field comparators — a pos L∞ threshold and a quaternion dot-product threshold — express both thresholds naturally and independently.
+
+**Decision.** The wire carries `{ pos: [3], rot: [4] }` (Invariant P). Scale is never on the wire. The sender reads both fields directly from the mesh's local channels; the receiver writes both fields back verbatim; no matrix composition or decomposition runs on either end.
+
+```mermaid
+flowchart LR
+  subgraph Owner[Owner client]
+    A["mesh.position, mesh.rotationQuaternion<br/>(unparented → local == world pre-scale)"] --> B["sampleMeshPose"]
+    B --> C["Wire: { pos: [3], rot: [4] }"]
+  end
+  subgraph Replica[Replica client]
+    C --> D["applyPoseToMesh"]
+    D --> E["mesh.position = pos<br/>mesh.rotationQuaternion = rot<br/>mesh.scaling untouched (static config)"]
+    E --> F["Babylon TRS:<br/>world = T(pos) · R(rot) · S(local static)<br/>== owner's world"]
+  end
+```
+
+**Why scale can legitimately be dropped.** Every client spawns each item via the same `CollectiblesManager` code path driven by the same `environment.items[*].instances[*].scale` config. The GLB re-orientation flip (`_x, _z → ×(-1)` for presents) is deterministic and identical on all clients. Therefore the local `mesh.scaling` is already the same everywhere and never needs to cross the wire. Since the rotation quaternion the sender reads is the *pre-scale* local rotation (`mesh.rotationQuaternion`, not the rotation block of the post-scale world matrix), the decomposition ambiguity of Problem 1 never arises: the sender simply never runs `decompose`, and the receiver's local mesh scaling composes with the sender's local rotation to give the correct world transform automatically.
+
+**Invariant P (normative restatement).** Senders MUST read `pos` from `mesh.position` and `rot` from `mesh.rotationQuaternion`; they MUST NOT sample `mesh.computeWorldMatrix()` nor decompose on send. Receivers MUST write `pos` onto `mesh.position` and `rot` onto `mesh.rotationQuaternion`; they MUST NOT touch `mesh.scaling`, write `mesh.rotation` (Euler), or call `setTargetTransform` / matrix APIs on the physics body. The sanctioned producer is `sampleMeshPose(mesh)`; the sanctioned consumer is `applyPoseToMesh(mesh, pose)` — both in [`src/client/utils/multiplayer_serialization.ts`](src/client/utils/multiplayer_serialization.ts).
+
+**Lesson 6 (extending §B.10).** *"The wire carries the minimal state that cannot be reproduced locally."* Mesh scale is authored per-asset and reproduced identically by every client at spawn; it does not belong on the wire. Any replicated quantity that both sides can derive from static data is a **liability**, not a feature — it introduces decomposition ambiguity, dirty-filter noise, bandwidth waste, and subtle sign bugs exactly like the present-rotation regression that motivated this section.

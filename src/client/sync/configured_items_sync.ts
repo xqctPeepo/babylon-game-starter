@@ -19,7 +19,7 @@
 // claim/release and owner-check logic on top of this module.
 
 import { CollectiblesManager } from '../managers/collectibles_manager';
-import { sampleWorldMatrix } from '../utils/multiplayer_serialization';
+import { sampleMeshPose } from '../utils/multiplayer_serialization';
 
 import { ItemSync } from './item_sync';
 
@@ -49,10 +49,10 @@ export function parseEnvScopedInstanceId(
 
 /**
  * Builds `ItemInstanceState` rows for every collectible + non-collectible physics item
- * tracked by the CollectiblesManager. Each row carries a single 4x4 world matrix field
- * per Invariants M and E in MULTIPLAYER_SYNCH.md §5.2; no separate position / rotation /
- * velocity fields, and no Euler reads on the sample path. Env-scoped instance ids let
- * peers filter by their current environment.
+ * tracked by the CollectiblesManager. Each row carries the mesh's pose as `{ pos, rot }`
+ * per Invariants P and E in MULTIPLAYER_SYNCH.md §5.2; no separate rotation-Euler or
+ * velocity fields, and no matrix decomposition on the sample path. Env-scoped instance
+ * ids let peers filter by their current environment.
  */
 export function sampleConfiguredItems(
   environmentName: string
@@ -73,10 +73,12 @@ export function sampleConfiguredItems(
       return;
     }
     const isCollected = CollectiblesManager.isCollectedInstance(id);
+    const pose = sampleMeshPose(mesh);
     out.push({
       instanceId: envScopedInstanceId(environmentName, id),
       itemName: entry.config.name,
-      matrix: sampleWorldMatrix(mesh),
+      pos: pose.pos,
+      rot: pose.rot,
       isCollected,
       timestamp: ts
     });
@@ -99,6 +101,9 @@ export function applyRemoteConfiguredItemState(
 ): void {
   const parsed = parseEnvScopedInstanceId(state.instanceId);
   if (!parsed || parsed.envName !== currentEnvironmentName) {
+    // Silently drop rows for other environments. The snapshot is still retained in
+    // the caller's `knownItemStates` map so it can be re-applied when the local
+    // client switches into this env (MULTIPLAYER_SYNCH.md §B.2).
     return;
   }
 
@@ -117,6 +122,9 @@ export function applyRemoteConfiguredItemState(
 
   const handle = CollectiblesManager.getMeshAndBody(parsed.localId);
   if (!handle) {
+    // Item not yet loaded (async GLB still pending). The caller re-applies the
+    // accumulated `knownItemStates` when `onEnvironmentItemsReady` fires, so this
+    // is expected during the narrow env-load → items-ready window.
     return;
   }
 

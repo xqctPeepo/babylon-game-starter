@@ -2,7 +2,7 @@
 
 **TL;DR:** All transforms are properly serialized, deserialized, and applied to meshes with full validation.
 
-> **Item / physics-object wire is matrix-only.** Per Invariants M and E in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state), every `ItemInstanceState` row carries exactly one transform field — `matrix: readonly number[]` of length 16 (row-major 4x4 world matrix, produced by `mesh.computeWorldMatrix(true).asArray()`). No `position`, no `rotation`, no `velocity`, and no Euler angles on item paths. The Euler / quaternion serializers below are used by **character sync only**; item sync uses `sampleWorldMatrix` and `applyMatrixToBody` in `multiplayer_serialization.ts`.
+> **Item / physics-object wire is pose-only.** Per Invariants P and E in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state), every `ItemInstanceState` row carries exactly two transform fields — `pos: readonly [number, number, number]` (world-space position) and `rot: readonly [number, number, number, number]` (unit quaternion `[x,y,z,w]`). No `matrix`, no Euler `rotation`, no `velocity`, and no `scale` on item paths. The Euler / quaternion serializers below are used by **character sync only**; item sync uses `sampleMeshPose` and `applyPoseToMesh` in `multiplayer_serialization.ts`.
 
 ---
 
@@ -17,19 +17,21 @@ const state = characterSync.sampleState(Date.now());
 CharacterSync.applyRemoteCharacterState(remoteMesh, state);
 ```
 
-### Item State (matrix-only, Invariant M)
+### Item State (pose-only, Invariant P)
 ```typescript
-// Owner: sample world matrix, publish row.
+// Owner: sample mesh pose, publish row.
+const pose = sampleMeshPose(presentMesh); // { pos: [x,y,z], rot: [x,y,z,w] }
 itemSync.updateItemState({
   instanceId: 'rv-life:present-1',
   itemName: 'present',
-  matrix: sampleWorldMatrix(presentMesh), // length 16, row-major
+  pos: pose.pos,
+  rot: pose.rot,
   isCollected: false,
   timestamp: Date.now(),
 });
 
-// Non-owner: decompose and apply to kinematic body.
-ItemSync.applyRemoteItemState(itemMesh, itemState); // internally calls applyMatrixToBody
+// Non-owner: write pose directly onto the mesh; Havok pre-step syncs to body.
+ItemSync.applyRemoteItemState(itemMesh, itemState); // internally calls applyPoseToMesh
 ```
 
 ### Light State
@@ -50,7 +52,7 @@ LightsSync.applyRemoteLightState(babylonLight, lightState);
 | Vector3 | `[x, y, z]` | `[10.5, 5.2, -15.3]` | characters, effects, lights |
 | Quaternion | `[x, y, z, w]` | `[0.1, 0.2, 0.3, 0.92]` | characters |
 | Euler (Radians) | `[x, y, z]` | `[0.1, 1.5, -0.2]` | characters (legacy; avoid on any new path) |
-| World matrix | `[m00…m33]` (16 floats, row-major) | `[1,0,0,0, 0,1,0,0, 0,0,1,0, 10.5,5.2,-15.3,1]` | **items / physics objects only** (Invariant M) |
+| Item pose | `{ pos: [x,y,z], rot: [x,y,z,w] }` (7 floats total) | `{ pos: [10.5, 5.2, -15.3], rot: [0, 0.707, 0, 0.707] }` | **items / physics objects only** (Invariant P) |
 | Color3 | `[r, g, b]` | `[1.0, 0.5, 0.2]` | all |
 | Color4 | `[r, g, b, a]` | `[1.0, 0.5, 0.2, 0.8]` | all |
 

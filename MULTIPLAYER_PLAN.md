@@ -30,7 +30,7 @@ Normative details live in [MULTIPLAYER_SYNCH.md §4.7](MULTIPLAYER_SYNCH.md#47-i
   - `envArrivalOrder: map[envName] []clientId` — FIFO of clients currently present in each env, in server-observed arrival order; head of the list is the env-authority ([§4.8](MULTIPLAYER_SYNCH.md#48-environment-item-authority-lifecycle)).
   - `itemOwners: map[instanceId] { ownerClientId, lastUpdatedAt }` — explicit per-item claims that override env-authority ([§4.7](MULTIPLAYER_SYNCH.md#47-item-authority-lifecycle)).
 - **Item Transform Cache**:
-  - `itemTransformCache: map[instanceId] CachedItemTransform { matrix [16]float64, isCollected, collectedByClientId, ownerClientId, lastBroadcastAt }` (Invariant M: single 4x4 world matrix per row; no `position`, `rotation`, or `velocity`).
+  - `itemTransformCache: map[instanceId] CachedItemTransform { pos [3]float64, rot [4]float64, isCollected, collectedByClientId, ownerClientId, lastBroadcastAt }` (Invariant P: pose-only transport — world-space position and unit quaternion per row; no `matrix`, `velocity`, `scale`, or Euler channels).
   - Used by the dirty filter to drop rebroadcasts of unchanged rows ([§5.2](MULTIPLAYER_SYNCH.md#52-item-state)).
   - Replayed wholesale to every new SSE session so late-joiners are not starved by the filter.
 - **State Sync Flow**:
@@ -67,7 +67,7 @@ Each client holds up to **three independent roles** at any moment (all optional,
   - Samples and publishes `ItemInstanceState` rows for those items.
   - Acquired by being first-in-env; handed off to the next-earliest remaining arrival when the current authority leaves or env-switches.
   - Observed via `env-item-authority-changed` signals.
-- **Explicit Item Owner Role** (per `instanceId`, independently held by any client). Responsible for one dynamic item's 4x4 world-matrix stream (Invariant M); overrides env-authority for that row:
+- **Explicit Item Owner Role** (per `instanceId`, independently held by any client). Responsible for one dynamic item's pose stream `{ pos, rot }` (Invariant P); overrides env-authority for that row:
   - Flips the local physics body for that one item to `DYNAMIC` on own, `ANIMATED` (kinematic) on yield.
   - Emits proximity claims before collision so the body is already dynamic at contact.
   - Releases after `claimGraceMs` of non-proximity at rest, on env-switch, or on disconnect.
@@ -99,16 +99,21 @@ interface CharacterState {
 
 ### 2. Item Synchronization (`multiplayer/item_sync.ts`)
 ```typescript
-// Invariant M (matrix-only wire) + Invariant E (no Euler on item paths).
-// The sole transform field is a row-major 4x4 world matrix (16 floats),
-// obtained on the owner as mesh.computeWorldMatrix(true).asArray().
-// Non-owners decompose it locally into (position, quaternion, scale),
-// discard the scale, and apply via body.setTargetTransform(pos, quat).
-// There is intentionally no position / rotation / velocity on this wire.
+// Invariant P (pose-only wire) + Invariant E (no Euler on item paths).
+// The transform is shipped as a pose pair — world-space position (3 floats)
+// and a unit quaternion [x,y,z,w] (4 floats), sampled on the owner via
+// sampleMeshPose(mesh) which reads mesh.position and mesh.rotationQuaternion
+// directly. Non-owners apply via applyPoseToMesh(mesh, pose), which writes
+// the channels back verbatim; Havok's pre-step (disablePreStep = false,
+// the default) copies mesh → body on the next tick for ANIMATED replicas.
+// There is intentionally no matrix, velocity, Euler rotation, or scale on
+// this wire: scale is a static per-client spawn value from config (identical
+// across clients, including negative-axis flips for GLB re-orientation).
 interface ItemInstanceState {
   instanceId: string;                  // Unique item instance
   itemName: string;                    // Reference to ItemConfig name
-  matrix: readonly number[];           // Length exactly 16, row-major 4x4 world matrix
+  pos: readonly [number, number, number];        // World-space position (Invariant P)
+  rot: readonly [number, number, number, number]; // Unit quaternion [x,y,z,w] (Invariant P)
   isCollected: boolean;
   collectedByClientId?: string;        // If collected
   ownerClientId?: string;              // Resolved owner attribution (optional)
@@ -405,7 +410,7 @@ Explicit release happens symmetrically when the owner leaves proximity for `clai
 
 - **Env default (Tier 2).** On first-in-env, env-authority is assigned; on leave / disconnect / env switch, it fails over to the next-earliest remaining arrival in that env, or clears if the env is empty. Handed-off clients resume publishing within one send-tick.
 - **Explicit override (Tier 3).** `Unowned → Claimed` on accepted proximity claim. `Claimed → Claimed` on accepted claim refresh or `item-state-update` from current owner. `Claimed → Unowned` on explicit release, owner disconnect, `claimIdleTimeoutMs` elapsed without updates, or environment switch — after which the item returns to the env-authority default.
-- Reference tunables: `claimRadiusMeters = 2.5`, `claimGraceMs = 3000`, `claimIdleTimeoutMs = 1500`, `matrixEpsilon = 1e-4` (unitless, applied element-wise to the 16-float matrix field — Invariant M).
+- Reference tunables: `claimRadiusMeters = 2.5`, `claimGraceMs = 3000`, `claimIdleTimeoutMs = 1500`, `posEpsilon = 5e-3` (meters, applied to `pos` — Invariant P), `rotDotThreshold = 0.99996` (unitless, `|q1 · q2| ≥ threshold` ⇒ same orientation within ~0.5° — Invariant P).
 
 ### Per-client freshness matrix
 
@@ -426,7 +431,7 @@ This one structure simultaneously implements self-echo elimination, late-joiner 
 The resolved owner's local physics simulation is the canonical, authoritative source of state for its items. Three consequences:
 
 - **The server MUST NOT echo the owner's rows back to the owner.** Enforced by the freshness matrix owner-pin (rule 1 above). A conforming client MUST additionally drop any self-owned row it receives (defense-in-depth for reconnect races).
-- **Non-owners MUST NOT run dynamic physics on non-owned items.** Non-owner bodies stay in `PhysicsMotionType.ANIMATED` (kinematic); incoming rows carry a single `matrix` field (Invariant M) which the non-owner decomposes into `(pos, quat)` and applies via `body.setTargetTransform(pos, quat)`. Non-owners MUST NOT call `setLinearVelocity`, `applyImpulse`, or `addForce` on such bodies. Because the wire does not carry velocity (Invariant M) and Euler channels are never read on item paths (Invariant E), there is no ambiguity between the owner's sample and the non-owner's apply.
+- **Non-owners MUST NOT run dynamic physics on non-owned items.** Non-owner bodies stay in `PhysicsMotionType.ANIMATED` (kinematic); incoming rows carry `pos` + `rot` fields (Invariant P) which the non-owner writes directly onto `mesh.position` and `mesh.rotationQuaternion` via `applyPoseToMesh`. Havok's pre-step sync (`disablePreStep = false`, the default) then copies the mesh channels onto the ANIMATED body before the next physics tick. Non-owners MUST NOT call `setTargetTransform`, `setLinearVelocity`, `applyImpulse`, or `addForce` on such bodies, and MUST NOT mutate `mesh.scaling` on this path (the local spawn scale from config is the source of truth). Because the wire does not carry velocity or Euler channels (Invariants P and E), there is no ambiguity between the owner's sample and the non-owner's apply.
 - **Gravity and contact response for an item originate on exactly one client — the resolved owner.** This is the fix for the "cake hovering and oscillating on the env-authority" and "presents dropping in slow motion" symptoms: the env-authority was fighting its own echoes through the kinematic target path. With owner-pin in place, the env-authority's body falls under gravity, its own simulation, exactly once.
 
 ### Motion-type invariants

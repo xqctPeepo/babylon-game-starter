@@ -4,7 +4,7 @@
 **Completion Date:** April 20, 2026  
 **Total Implementation:** 1,040 lines of code + 1,356 lines of documentation
 
-> **Item transform wire is matrix-only (Invariant M) and Euler-free (Invariant E).** `ItemInstanceState` on the wire carries a single `matrix: readonly number[]` field of length 16 — the row-major 4x4 world matrix. The Euler / quaternion helpers enumerated below are used by character sync; item sync uses `sampleWorldMatrix(mesh)` (owner) and `applyMatrixToBody(body, matrix)` (non-owner) in `src/client/utils/multiplayer_serialization.ts`. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state).
+> **Item transform wire is pose-only (Invariant P) and Euler-free (Invariant E).** `ItemInstanceState` on the wire carries `pos: [number, number, number]` (world-space position) and `rot: [number, number, number, number]` (unit quaternion `[x,y,z,w]`) — no matrix, no Euler, no velocity, no scale. The Euler / quaternion helpers enumerated below are used by character sync; item sync uses `sampleMeshPose(mesh)` (owner) and `applyPoseToMesh(mesh, pose)` (non-owner) in `src/client/utils/multiplayer_serialization.ts`. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state).
 
 ---
 
@@ -56,7 +56,7 @@
 **File:** `src/client/sync/item_sync.ts`
 
 ✅ **Implementation**
-- `applyRemoteItemState()` - 4x4 world matrix decomposed → `setTargetTransform(pos, quat)` on kinematic body; visibility for collection
+- `applyRemoteItemState()` - Pose pair `{ pos, rot }` written directly onto `mesh.position` and `mesh.rotationQuaternion` via `applyPoseToMesh`; Havok pre-step syncs mesh → ANIMATED body on the next tick; visibility for collection
 - Collection status → mesh visibility binding
 - `markItemCollected()` - State management
 - `removeItemState()` - Cleanup
@@ -162,7 +162,7 @@
 
 ### Completeness
 - ✅ Characters: Position, rotation, velocity, animation, boost
-- ✅ Items: 4x4 world matrix (Invariants M/E — 16 floats, row-major; no Euler, no velocity on item paths), collection status
+- ✅ Items: pose pair `{ pos: [3], rot: [4] }` (Invariants P/E — 7 floats total; no matrix, Euler, velocity, or scale on item paths), collection status
 - ✅ Lights: All properties, type-specific handling
 - ✅ Particles: Position, active state
 - ✅ Sky: Effect type, intensity, duration

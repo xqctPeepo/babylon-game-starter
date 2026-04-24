@@ -287,7 +287,7 @@ func (ms *MultiplayerServer) pushAuthoritySnapshotToSession(sessionID string) {
 			continue
 		}
 		envEntries = append(envEntries, map[string]interface{}{
-			"envName":         envName,
+			"environmentName": envName, // §6.9 field name
 			"newAuthorityId":  authClientID,
 			"prevAuthorityId": nil,
 			"reason":          "snapshot",

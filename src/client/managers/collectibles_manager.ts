@@ -730,6 +730,13 @@ export class CollectiblesManager {
       if (body.getMotionType() !== motionType) {
         body.setMotionType(motionType);
       }
+      // Leave body.disablePreStep at its default (false). The non-owner apply
+      // path writes mesh.position / rotationQuaternion directly (see
+      // MULTIPLAYER_SYNCH.md §B.9 mesh-direct kinematic apply); the pre-step
+      // sync then copies mesh → body before each physics tick, which is exactly
+      // what we want for an ANIMATED replica. Toggling disablePreStep here would
+      // break that propagation path on a former-DYNAMIC body that flips back to
+      // ANIMATED after we lose authority.
       if (kinematic) {
         body.setLinearVelocity(BABYLON.Vector3.Zero());
         body.setAngularVelocity(BABYLON.Vector3.Zero());

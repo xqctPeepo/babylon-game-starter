@@ -40,9 +40,10 @@ export function coerceTriplet(raw: unknown): [number, number, number] | null {
 }
 
 /**
- * Wire rotation for **character sync only**: unit quaternion [x, y, z, w].
- * Item rotation is not a separate field on the wire — items carry a single 4x4 world
- * matrix (Invariant M in [MULTIPLAYER_SYNCH.md §5.2](../../../MULTIPLAYER_SYNCH.md#52-item-state)).
+ * Wire rotation for **character sync** and **item sync**: unit quaternion [x, y, z, w].
+ * Items carry a `pos` + `rot` pose pair on the wire — Invariant P in
+ * [MULTIPLAYER_SYNCH.md §5.2](../../../MULTIPLAYER_SYNCH.md#52-item-state). `rot` is
+ * validated and normalized via this function.
  */
 export function coerceQuaternion(raw: unknown): QuaternionSerializable | null {
   if (!Array.isArray(raw) || raw.length !== 4) {
@@ -58,27 +59,6 @@ export function coerceQuaternion(raw: unknown): QuaternionSerializable | null {
   return normalizeQuaternion([x, y, z, w]);
 }
 
-/**
- * Coerce the item-wire `matrix` field per Invariant M. Requires an array of length exactly 16
- * with finite, per-component-clampable entries. Returns the clamped array on success, `null`
- * on any failure (length mismatch, non-finite component). Callers MUST drop rows that return
- * `null`.
- */
-export function coerceMatrix16(raw: unknown): readonly number[] | null {
-  if (!Array.isArray(raw) || raw.length !== 16) {
-    return null;
-  }
-  const out = new Array<number>(16);
-  for (let i = 0; i < 16; i++) {
-    const v = Number(raw[i]);
-    if (!Number.isFinite(v)) {
-      return null;
-    }
-    out[i] = clampCoordComponent(v);
-  }
-  return out;
-}
-
 export function coerceItemInstanceState(raw: unknown): ItemInstanceState | null {
   if (raw === null || typeof raw !== 'object') {
     return null;
@@ -91,11 +71,13 @@ export function coerceItemInstanceState(raw: unknown): ItemInstanceState | null 
   }
 
   const isCollected = Boolean(o.isCollected);
-  const matrix = coerceMatrix16(o.matrix);
-  // Invariant M: a live (non-collected) row MUST carry a valid 16-float matrix.
-  // Collection-only rows (isCollected=true) are tolerated without a matrix because
-  // the receiver hides the mesh and the transform is irrelevant.
-  if (!matrix && !isCollected) {
+
+  // Invariant P (pose-only): a live (non-collected) row MUST carry a valid `pos` and
+  // `rot`. Collection-only rows (isCollected=true) are tolerated without a pose
+  // because the receiver hides the mesh and the transform is irrelevant.
+  const pos = coerceWorldVector3(o.pos);
+  const rot = coerceQuaternion(o.rot);
+  if ((!pos || !rot) && !isCollected) {
     return null;
   }
 
@@ -117,7 +99,8 @@ export function coerceItemInstanceState(raw: unknown): ItemInstanceState | null 
   return {
     instanceId,
     itemName,
-    matrix: matrix ?? [],
+    pos: pos ?? [0, 0, 0],
+    rot: rot ?? [0, 0, 0, 1],
     isCollected,
     collectedByClientId: collectedBy,
     ownerClientId,

@@ -11,14 +11,15 @@
 //     (../../../MULTIPLAYER_SYNCH.md#75-item-authority-authorization)
 //
 // This module is the low-level abstraction that tracks per-instance snapshots and applies
-// remote snapshots to physics aggregates (teleporting kinematic bodies via
-// `setTargetTransform`). It is intentionally authority-agnostic: callers (e.g.
+// remote snapshots onto local meshes. Per MULTIPLAYER_SYNCH.md §B.9 (mesh-direct kinematic
+// apply), the apply path writes `mesh.position` + `mesh.rotationQuaternion` directly;
+// Havok's pre-step sync then propagates the pose onto the ANIMATED physics body before
+// the next physics tick. It is intentionally authority-agnostic: callers (e.g.
 // `configured_items_sync.ts`) decide whether the local client currently owns an instanceId
 // and may publish rows for it.
 
 import {
-  applyMatrixToBody,
-  applyMatrixToMesh,
+  applyPoseToMesh,
   ThrottledFunction
 } from '../utils/multiplayer_serialization';
 
@@ -90,15 +91,30 @@ export class ItemSync {
   /**
    * Applies a remote item snapshot to a mesh (and its kinematic physics body if present).
    *
-   * Wire contract (Invariants M and E, MULTIPLAYER_SYNCH.md §5.2): `state.matrix` is the
-   * sole transform field — a 16-float row-major world matrix. The receiver decomposes it
-   * into position + quaternion (scale discarded) and:
-   *   - drives `body.setTargetTransform(pos, quat)` when a non-disposed body exists;
-   *   - else writes `mesh.position` + `mesh.rotationQuaternion` directly.
+   * Wire contract (Invariants P and E, MULTIPLAYER_SYNCH.md §5.2): `state.pos` is the
+   * world-space position and `state.rot` is the pre-scale unit quaternion, both read
+   * from the owner's local mesh channels and written verbatim onto the replica's local
+   * channels. No matrix decomposition on either side; `mesh.scaling` is never touched
+   * because it is a static per-client config value (see §5.2 pose-only transport).
    *
-   * The applier MUST NOT call `setLinearVelocity` / `setAngularVelocity` — non-owner
-   * bodies are ANIMATED (kinematic) per the non-owner kinematic invariant (§4.7). Euler
-   * channels (`mesh.rotation`) are never written on this path.
+   * Apply strategy (MULTIPLAYER_SYNCH.md §B.9 — kinematic apply pattern):
+   *   - **Never** call `setTargetTransform` on the physics body. `setTargetTransform`
+   *     is designed for authored kinematic animation (moving platforms etc.); when
+   *     fed with a new replica target every tick it produces the "whizzing demon"
+   *     artefact on P2 as the interpolator is retargeted before it reaches each
+   *     prior target.
+   *   - **Never** toggle `body.disablePreStep`. The default (`false`) lets Havok's
+   *     pre-step copy `mesh.position` / `mesh.rotationQuaternion` onto the body
+   *     before each step — i.e. the canonical ANIMATED-body drive path.
+   *   - **Never** call `setLinearVelocity` / `setAngularVelocity` — non-owner
+   *     bodies are ANIMATED (kinematic) per the non-owner kinematic invariant
+   *     (§4.7) and integrating velocities would violate that.
+   *   - Euler channels (`mesh.rotation`) are never written (Invariant E).
+   *
+   * Short-circuit on DYNAMIC bodies: a DYNAMIC motion type implies the local client
+   * IS the resolved owner. Receiving a remote snapshot for an owned item signals an
+   * authority-routing bug upstream; blindly writing its pose would fight the local
+   * simulation. We ignore and log so the mismatch is visible.
    */
   public static applyRemoteItemState(
     itemMesh: BABYLON.AbstractMesh,
@@ -111,28 +127,31 @@ export class ItemSync {
       body && !body.body.isDisposed ? body.body : this.resolveMeshPhysicsBody(itemMesh);
 
     if (!state.isCollected) {
-      if (!Array.isArray(state.matrix) || state.matrix.length !== 16) {
+      const hasPose =
+        Array.isArray(state.pos) && state.pos.length === 3 &&
+        Array.isArray(state.rot) && state.rot.length === 4;
+      if (!hasPose) {
         // Collection status still needs to be applied below.
-      } else if (physicsBody && !physicsBody.isDisposed) {
-        try {
-          applyMatrixToBody(physicsBody, state.matrix);
-        } catch (e) {
-          try {
-            applyMatrixToMesh(itemMesh, state.matrix);
-          } catch (fallbackError) {
-            console.warn(
-              '[ItemSync] Fallback matrix apply failed:',
-              fallbackError,
-              'original:',
-              e
-            );
-          }
-        }
+      } else if (
+        physicsBody &&
+        !physicsBody.isDisposed &&
+        physicsBody.getMotionType() === BABYLON.PhysicsMotionType.DYNAMIC
+      ) {
+        // We own this body (DYNAMIC = local simulation). Remote state must not
+        // be written; it would compete with our own physics step. The server's
+        // owner-pin rule is supposed to prevent this from arriving, so log.
+        console.warn(
+          `[ItemSync] Received remote state for DYNAMIC (self-owned) item ${state.instanceId}; ignoring.`
+        );
       } else {
+        // ANIMATED (kinematic) or no body: write the pose (pos + rotationQuaternion)
+        // directly onto the mesh. On the next physics tick, Havok's pre-step sync
+        // (disablePreStep=false, default) copies those channels onto the body so
+        // collision queries see the correct pose without any interpolation surprises.
         try {
-          applyMatrixToMesh(itemMesh, state.matrix);
+          applyPoseToMesh(itemMesh, { pos: state.pos, rot: state.rot });
         } catch (e) {
-          console.warn('[ItemSync] Failed to apply matrix:', e);
+          console.warn('[ItemSync] Failed to apply pose:', e);
         }
       }
     }

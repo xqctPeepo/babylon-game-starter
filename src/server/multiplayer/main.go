@@ -26,6 +26,23 @@ type ItemOwner struct {
 	LastUpdatedAt int64 // wall-clock ms
 }
 
+// CachedItemTransform is the server-side per-item transform cache entry
+// (MULTIPLAYER_SYNCH.md §5.2.1 global dirty filter). Stores the last accepted
+// field values so the dirty-filter comparator can suppress unchanged repeats.
+//
+// Transforms are stored as pose: Pos (world-space position, 3 floats) and Rot
+// (unit quaternion [x,y,z,w], 4 floats) — Invariant P. Scale is never cached
+// because it is a static per-client spawn value (see §5.2).
+type CachedItemTransform struct {
+	Pos                 [3]float64
+	Rot                 [4]float64
+	ItemName            string // mirrors the client's `itemName` field; required by coerceItemInstanceState
+	IsCollected         bool
+	CollectedByClientID string
+	OwnerClientID       string
+	LastBroadcastAt     int64 // wall-clock ms at last DIRTY broadcast
+}
+
 // MultiplayerServer manages all connected clients and state synchronization
 type MultiplayerServer struct {
 	mu                  sync.RWMutex
@@ -36,8 +53,11 @@ type MultiplayerServer struct {
 	sessionIDToClientID map[string]string                             // For SSE auth
 	sseSessions         map[string]*datastar.ServerSentEventGenerator // Track active SSE sessions
 	sseMu               sync.RWMutex
-	// Last synchronizer item/world PATCH body (full snapshot for late joiners).
-	lastItemState map[string]interface{}
+	// Per-item transform cache — stores the latest accepted ItemInstanceState fields per
+	// instanceId (MULTIPLAYER_SYNCH.md §5.2.1). Used for the dirty filter (suppress
+	// unchanged repeats from broadcast) and as the authoritative source for late-joiner
+	// bootstrap snapshots (replaces the former single lastItemState blob).
+	itemTransformCache map[string]CachedItemTransform
 	// Last known pose per clientId (merged from character-state PATCHes).
 	lastCharacterStates map[string]interface{}
 	// Per-item authority map (§4.7). Keyed by instanceId.
@@ -59,6 +79,7 @@ func NewMultiplayerServer(maxClients int) *MultiplayerServer {
 		maxClients:          maxClients,
 		sessionIDToClientID: make(map[string]string),
 		sseSessions:         make(map[string]*datastar.ServerSentEventGenerator),
+		itemTransformCache:  make(map[string]CachedItemTransform),
 		lastCharacterStates: make(map[string]interface{}),
 		itemOwners:          make(map[string]*ItemOwner),
 		claimIdleTimeoutMs:  1500,
@@ -159,10 +180,12 @@ func (ms *MultiplayerServer) broadcastExcept(excludedSessionID string, signalNam
 	}
 
 	ms.sseMu.RLock()
+	count := 0
 	for sessionID, sse := range ms.sseSessions {
 		if sessionID == excludedSessionID || sse == nil || sse.IsClosed() {
 			continue
 		}
+		count++
 		go func(stream *datastar.ServerSentEventGenerator) {
 			if err := stream.MarshalAndPatchSignals(multiplayerSignalPatch(signalName, payload)); err != nil {
 				log.Printf("[Broadcast] Failed to patch signals for %s: %v", signalName, err)
@@ -171,6 +194,7 @@ func (ms *MultiplayerServer) broadcastExcept(excludedSessionID string, signalNam
 	}
 	ms.sseMu.RUnlock()
 
+	log.Printf("[Broadcast] Signal %s sent to %d clients (excl sender)", signalName, count)
 	return nil
 }
 

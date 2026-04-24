@@ -67,7 +67,7 @@ Complementing the authority model, the server runs a **dirty filter** on item-st
 
 **Sync Modules** (5 separate sync trackers)
 - `src/client/sync/character_sync.ts` - Character position/animation/boost tracking
-- `src/client/sync/item_sync.ts` - Item 4x4 world matrices (Invariant M) and collection events
+- `src/client/sync/item_sync.ts` - Item poses `{ pos, rot }` (Invariant P) and collection events
 - `src/client/sync/effects_sync.ts` - Particle effects and environment particles
 - `src/client/sync/lights_sync.ts` - Dynamic light state changes
 - `src/client/sync/sky_sync.ts` - Sky effect state (heat lightning, color blends)
@@ -209,7 +209,7 @@ Remote Meshes Updated
 | Entity | Fields | Update Frequency | Sync Threshold |
 |--------|--------|------------------|-----------------|
 | **Character** | Position, rotation, velocity, animation, boost | 20 Hz (50ms) | 0.1 units / 0.05 rad |
-| **Item** | 4x4 world matrix (16 floats, row-major — Invariant M), collected flag | 10 Hz (100ms) | `matrixEpsilon = 1e-4` (element-wise) |
+| **Item** | Pose pair `{ pos: [3], rot: [4] }` (7 floats — Invariant P), collected flag | 10 Hz (100ms) | `posEpsilon = 5e-3` m, `rotDotThreshold = 0.99996` (~0.5°) |
 | **Particle Effect** | Position, active state | 10 Hz (100ms) | Any change |
 | **Light** | Position, color, intensity | 10 Hz (100ms) | Any change |
 | **Sky Effect** | Effect type, parameters | 10 Hz (100ms) | Any change |
@@ -438,7 +438,7 @@ With 4 players, each moving:
 - [ ] **Cake-newcomer-animated**: P2 joins an RV Life session where P1 is already env-authority. Before P2's first local physics tick in RV Life, every in-env item (including the cake) is in `PhysicsMotionType.ANIMATED`. The cake stays `ANIMATED` on P2 until either P2 is promoted to env-authority via handoff (P1 leaves) or P2 claims via proximity. While P1 is env-authority, P1 pushing the cake causes the cake on P2 to move smoothly via kinematic-target interpolation (no teleport, no jitter). (§6.2 rule 4 *ANIMATED-default-then-promote*.)
 - [ ] **Authority-snapshot-promotes-to-dynamic**: P1 joins RV Life empty-env. Before the authority snapshot arrives on P1's SSE open, every RV Life item is ANIMATED on P1. After the snapshot names P1 as `envAuthority[RV_Life]`, `seedMotionTypesForEnv(RV_Life)` runs and every unclaimed RV Life item flips to `DYNAMIC` atomically on P1. P1's physics loop resumes; presents fall at real gravity. (§6.2 rule 5 trigger c.)
 - [ ] **Env-authority-handoff-reseeds**: P1 is env-authority in RV Life. P1 disconnects. Server emits `env-item-authority-changed` naming P2 as new env-authority. On P2, `onEnvItemAuthorityChanged` calls `seedMotionTypesForEnv(RV_Life)` atomically; every item for which P2 is now resolved owner flips `ANIMATED → DYNAMIC` without teleport; P2 resumes publishing rows within one send-tick. (§6.2 rule 5 trigger b.)
-- [ ] **Matrix-only-wire**: open devtools network tab, filter to `item-state-update` SSE events, inspect a representative payload — every `updates[]` row MUST contain `matrix` of length 16 and MUST NOT contain `position`, `rotation`, or `velocity` (Invariant M, Invariant E).
+- [ ] **Pose-only-wire**: open devtools network tab, filter to `item-state-update` SSE events, inspect a representative payload — every `updates[]` row MUST contain `pos` of length 3 and `rot` of length 4, and MUST NOT contain `matrix`, `position` (spelled out), Euler `rotation`, `velocity`, or `scale` (Invariant P, Invariant E).
 - [ ] **Pre-scene-spawn-dynamic**: P1 joins RV Life empty-env. Instrument `CollectiblesManager.createCollectibleInstance` with a one-shot log line capturing the initial motion type per item. The log MUST show every mass>0 item created `DYNAMIC` on P1 at the very first spawn — no `ANIMATED`-then-promote step is needed (Invariant P).
 - [ ] **Pre-scene-spawn-animated**: P1 is env-authority of RV Life with items settled. P2 joins RV Life. Same instrumentation on P2: every mass>0 item MUST be created `ANIMATED` at spawn (never flipped from `DYNAMIC`), and the first `item-state-update` burst supplies the target transforms. Visual result on P2: zero whipping, zero blur, items appear at P1's settled poses immediately (Invariant P + M).
 - [ ] **SSE-Brotli-active**: `GET /api/multiplayer/stream` response headers show `Content-Encoding: br` (or `gzip` if `MULTIPLAYER_SSE_COMPRESSION=gzip`) and no `Content-Length`; events still arrive continuously with sub-50ms frame-to-frame latency (no batching)
