@@ -314,9 +314,6 @@ export async function initMultiplayerAfterCharacterReady(
     if (!msg || (!msg.updates?.length && !msg.collections?.length)) {
       return;
     }
-    // Merge this update into the accumulated known-state dictionary so that the
-    // next env-switch / items-ready re-apply uses the FULL position set, not
-    // just the items present in this (possibly partial) broadcast.
     if (msg.updates?.length) {
       for (const rawSt of msg.updates) {
         const st = coerceItemInstanceState(rawSt);
@@ -360,10 +357,26 @@ export async function initMultiplayerAfterCharacterReady(
     // unconditionally to keep the DYNAMIC-only-on-owner invariant robust
     // against duplicate or out-of-order authority signals.
     if (authorityTracker.getSelfClientId()) {
-      applyMotionTypeForInstance(
-        msg.instanceId,
-        authorityTracker.isOwnedBySelf(msg.instanceId)
-      );
+      const selfOwnsNow = authorityTracker.isOwnedBySelf(msg.instanceId);
+      applyMotionTypeForInstance(msg.instanceId, selfOwnsNow);
+      // Fix 8 (post-transition pose re-apply). When authority moves off self,
+      // the local DYNAMIC body may have simulated the item to a pose that
+      // diverges from the authority's pose. The new owner's next sample will
+      // only broadcast if it trips the server's 5 mm / 0.5° dirty filter
+      // (handlers.go `isDirtyRow`), so a resting item stays stuck at the
+      // diverged local pose unless we re-apply the last known remote snapshot
+      // here. Mirrors what `env-item-authority-changed` already does via
+      // `applyItemSnapshot(buildFullSnapshot())` for the whole env.
+      if (!selfOwnsNow) {
+        const last = knownItemStates.get(msg.instanceId);
+        if (last) {
+          applyItemSnapshot({
+            updates: [last],
+            collections: [],
+            timestamp: Date.now()
+          });
+        }
+      }
     }
   });
 
@@ -541,6 +554,14 @@ export async function initMultiplayerAfterCharacterReady(
   // flipped); the idempotent-snapshot safety-net lives in the pre-join listener.
   const unsubAuthorityChange = authorityTracker.onChange((evt) => {
     applyMotionTypeForInstance(evt.instanceId, evt.selfOwnsNow);
+    // When authority moves away from self, drop any pending publish row so the
+    // next throttle window does not replay a stale pose the server will reject.
+    // `includeRow` would also gate this on the next sample tick, but evicting
+    // eagerly avoids one extra "unauthorized row" round-trip and makes the
+    // ItemSync map converge to exactly-what-we-may-publish at transition time.
+    if (evt.selfOwnedBefore && !evt.selfOwnsNow) {
+      worldPhysicsItemSync.removeItemState(evt.instanceId);
+    }
   });
 
   // ---- Proximity claim observer ----
@@ -738,6 +759,13 @@ export async function initMultiplayerAfterCharacterReady(
       for (const st of physStates) {
         if (includeRow(st)) {
           worldPhysicsItemSync.updateItemState(st);
+        } else {
+          // Evict stale rows the moment we stop being authorised to publish them
+          // (see §7.5 authority filter): otherwise `ItemSync.createStateUpdate`
+          // keeps replaying the last-owned pose every throttle window, producing
+          // perpetual "Filtered N unauthorized row(s)" noise on the server and
+          // blocking the DYNAMIC→ANIMATED invariant on the peer side.
+          worldPhysicsItemSync.removeItemState(st.instanceId);
         }
       }
       const itemStates = sampleConfiguredItems(envNow);
@@ -753,6 +781,7 @@ export async function initMultiplayerAfterCharacterReady(
           worldPhysicsItemSync.updateItemState(st);
           includedCount++;
         } else {
+          worldPhysicsItemSync.removeItemState(st.instanceId);
           excludedCount++;
         }
       }

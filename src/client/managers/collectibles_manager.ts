@@ -279,12 +279,16 @@ export class CollectiblesManager {
         meshInstance.setParent(null);
       }
 
-      // Apply instance properties
+      // Apply instance properties.
+      // Invariant E (multiplayer_serialization.ts §"Pose-only transport"): the Euler
+      // `mesh.rotation` channel MUST NEVER be written — `sampleMeshPose` reads only
+      // `rotationQuaternion`, so a raw Euler assignment would leave peers with a
+      // null quaternion and divergent rotations until a remote pose lands.
       meshInstance.position = instance.position;
       meshInstance.scaling.setAll(instance.scale);
       meshInstance.scaling._x *= -1;
       meshInstance.scaling._z *= -1;
-      meshInstance.rotation = instance.rotation;
+      meshInstance.rotationQuaternion = BABYLON.Quaternion.FromEulerVector(instance.rotation);
 
       // Make it visible and enabled
       meshInstance.isVisible = true;
@@ -376,10 +380,14 @@ export class CollectiblesManager {
         meshInstance.setParent(null);
       }
 
-      // Apply instance properties
+      // Apply instance properties.
+      // Invariant E (multiplayer_serialization.ts §"Pose-only transport"): the Euler
+      // `mesh.rotation` channel MUST NEVER be written — `sampleMeshPose` reads only
+      // `rotationQuaternion`, so a raw Euler assignment would leave peers with a
+      // null quaternion and divergent rotations until a remote pose lands.
       meshInstance.position = instance.position;
       meshInstance.scaling.setAll(instance.scale);
-      meshInstance.rotation = instance.rotation;
+      meshInstance.rotationQuaternion = BABYLON.Quaternion.FromEulerVector(instance.rotation);
 
       // Make it visible and enabled
       meshInstance.isVisible = true;
@@ -693,6 +701,12 @@ export class CollectiblesManager {
         if (kinematic) {
           body.setLinearVelocity(BABYLON.Vector3.Zero());
           body.setAngularVelocity(BABYLON.Vector3.Zero());
+          // Havok sets disablePreStep=true when a body was ever DYNAMIC. For an
+          // ANIMATED (kinematic) replica we need mesh→body propagation on every
+          // pre-step (MULTIPLAYER_SYNCH.md §B.9), so force it back to false.
+          body.disablePreStep = false;
+        } else {
+          body.disablePreStep = true;
         }
       } catch {
         /* Havok edge cases (e.g. body mid-initialization) — try again next frame */
@@ -730,16 +744,20 @@ export class CollectiblesManager {
       if (body.getMotionType() !== motionType) {
         body.setMotionType(motionType);
       }
-      // Leave body.disablePreStep at its default (false). The non-owner apply
-      // path writes mesh.position / rotationQuaternion directly (see
-      // MULTIPLAYER_SYNCH.md §B.9 mesh-direct kinematic apply); the pre-step
-      // sync then copies mesh → body before each physics tick, which is exactly
-      // what we want for an ANIMATED replica. Toggling disablePreStep here would
-      // break that propagation path on a former-DYNAMIC body that flips back to
-      // ANIMATED after we lose authority.
       if (kinematic) {
         body.setLinearVelocity(BABYLON.Vector3.Zero());
         body.setAngularVelocity(BABYLON.Vector3.Zero());
+        // Havok's PhysicsAggregate constructor sets disablePreStep=true for
+        // DYNAMIC bodies so the initial simulation is not disturbed by mesh
+        // writes. When we flip to ANIMATED (peer replica), the non-owner apply
+        // path writes mesh.position / rotationQuaternion directly (see
+        // MULTIPLAYER_SYNCH.md §B.9) and relies on Havok's pre-step to copy
+        // mesh → body before each physics tick. Force disablePreStep=false
+        // here or the mesh writes are silently overridden by the body pose
+        // on the next post-step.
+        body.disablePreStep = false;
+      } else {
+        body.disablePreStep = true;
       }
       return true;
     } catch {

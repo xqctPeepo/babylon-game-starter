@@ -155,7 +155,12 @@ export class ProximityClaimObserver {
     st.claimInFlight = true;
     st.lastClaimAttemptAt = now;
 
-    if (this.tracker.isUnowned(id)) {
+    // Track whether THIS call was the one that flipped local state to self.
+    // `isUnowned` must be sampled BEFORE the optimistic flip because
+    // `optimisticSetSelfOwner` writes `owners.set(instanceId, selfClientId)`,
+    // which would make `isUnowned` lie on a subsequent read.
+    const didOptimistic = this.tracker.isUnowned(id);
+    if (didOptimistic) {
       this.tracker.optimisticSetSelfOwner(id);
     }
 
@@ -167,15 +172,58 @@ export class ProximityClaimObserver {
     void this.mp
       .claimItemAuthority(id, payload)
       .then((resp) => {
+        // Case A: network/non-OK (resp === null). If we flipped optimistic,
+        // revert — otherwise the client stays pinned as owner forever, flips
+        // its body to DYNAMIC, and its ItemSync keeps replaying a row the
+        // server will mark "unauthorized" every throttle window.
         if (!resp) {
+          if (didOptimistic) {
+            // Use reason='release' (the only non-claim, non-system reason in
+            // ItemAuthorityChangedMessage) to represent a locally-initiated
+            // revert of a never-confirmed optimistic claim. No signal is sent
+            // over the network; this is a tracker-local correction only.
+            this.tracker.applyAuthorityChange({
+              instanceId: id,
+              previousOwnerId: selfClientId,
+              newOwnerId: null,
+              reason: 'release',
+              timestamp: Date.now()
+            });
+          }
           return;
         }
-        if (!resp.accepted && resp.currentOwnerId && resp.currentOwnerId !== selfClientId) {
+
+        // Case B: server accepted our claim (possibly after idle-timeout
+        // takeover). The authoritative `item-authority-changed` SSE signal
+        // will still land; nothing to revert here.
+        if (resp.accepted) {
+          return;
+        }
+
+        // Case C: server rejected AND named a different current owner.
+        // Apply the server's view directly; this also replaces our optimistic
+        // self-owner entry in `owners` with the real owner.
+        if (resp.currentOwnerId && resp.currentOwnerId !== selfClientId) {
           this.tracker.applyAuthorityChange({
             instanceId: id,
-            previousOwnerId: null,
+            previousOwnerId: selfClientId,
             newOwnerId: resp.currentOwnerId,
             reason: 'claim',
+            timestamp: resp.serverTimestamp
+          });
+          return;
+        }
+
+        // Case D: ambiguous reject (no currentOwnerId, or it echoes self).
+        // Safest recovery is to drop the optimistic flip so authority is
+        // re-derived from env-authority / explicit ownership and the item's
+        // body is returned to ANIMATED until a real claim succeeds.
+        if (didOptimistic) {
+          this.tracker.applyAuthorityChange({
+            instanceId: id,
+            previousOwnerId: selfClientId,
+            newOwnerId: null,
+            reason: 'release',
             timestamp: resp.serverTimestamp
           });
         }

@@ -591,7 +591,7 @@ export const ASSETS = {
               position: new BABYLON.Vector3(5, 2, 1),
               scale: 1.0,
               rotation: new BABYLON.Vector3(0, 0, 0),
-              mass: 100,
+              mass: 5,
               colliderType: 'CONVEX_HULL',
               friction: 0.9
             }

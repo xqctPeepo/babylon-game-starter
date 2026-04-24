@@ -146,8 +146,8 @@ export class ItemSync {
       } else {
         // ANIMATED (kinematic) or no body: write the pose (pos + rotationQuaternion)
         // directly onto the mesh. On the next physics tick, Havok's pre-step sync
-        // (disablePreStep=false, default) copies those channels onto the body so
-        // collision queries see the correct pose without any interpolation surprises.
+        // (disablePreStep=false) copies those channels onto the body so collision
+        // queries see the correct pose without any interpolation surprises.
         try {
           applyPoseToMesh(itemMesh, { pos: state.pos, rot: state.rot });
         } catch (e) {
