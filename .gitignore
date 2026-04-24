@@ -9,3 +9,9 @@ dist
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Debug/test screenshots
+*.png
