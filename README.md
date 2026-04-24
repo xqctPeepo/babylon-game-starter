@@ -1,5 +1,11 @@
 # Babylon Game Starter
 
+[![CI](https://github.com/EricEisaman/babylon-game-starter/actions/workflows/typecheck.yml/badge.svg)](https://github.com/EricEisaman/babylon-game-starter/actions/workflows/typecheck.yml)
+[![Babylon.js](https://img.shields.io/badge/Babylon.js-v9-BB464B?logo=babylon.js&logoColor=white)](https://www.babylonjs.com)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A518-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A modular, configuration-driven 3D game framework built with **Babylon.js v9**, **TypeScript**, and **Vite**.
 
 Babylon Game Starter provides a complete, ready-to-run foundation for building interactive 3D browser games. It ships with physics-based character movement, an environment system, collectibles, inventory, a behavior trigger system (proximity and fall-out-of-map), particle effects, an AudioV2-powered sound engine, and full mobile control support — all driven by configuration files. The same client can be bundled for the **Babylon.js Playground** via `playground.json`.
@@ -72,7 +78,7 @@ CI (`.github/workflows/typecheck.yml`) runs **`format:check` → `lint` → `typ
 
 ## Project structure
 
-```
+```text
 src/client/
   config/              # assets.ts, game_config.ts, input_keys.ts, mobile_controls.ts,
                        # character_states.ts, local_dev.ts
@@ -103,7 +109,12 @@ eslint.config.js
 ## Documentation
 
 - **[USERS_GUIDE.md](USERS_GUIDE.md)** — Architecture, configuration, behaviors, fall respawn, condensed narrative notes
+- **[MULTIPLAYER.md](MULTIPLAYER.md)** — Multiplayer onboarding, configuration, testing, and troubleshooting
+- **[MULTIPLAYER_SYNCH.md](MULTIPLAYER_SYNCH.md)** — Normative wire contract, authority rules, and item-sync spec
+- **[SERIALIZATION_GUIDE.md](SERIALIZATION_GUIDE.md)** — State serialization, deserialization, and mesh application
+- **[SERIALIZATION_QUICK_REF.md](SERIALIZATION_QUICK_REF.md)** — Cheat-sheet for the serialization helpers
 - **[src/deployment/DEPLOYMENT.md](src/deployment/DEPLOYMENT.md)** — Settings-driven deploy, Docker, host artifacts
+- **[RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)** — Production deploy on Render.com
 - **[STYLE.md](STYLE.md)** — TypeScript / ESLint / Prettier expectations for contributors
 
 ---
@@ -112,11 +123,37 @@ eslint.config.js
 
 ```mermaid
 flowchart TD
-  viteMain["main.ts"] --> playgroundClass["index.ts Playground"]
+  viteMain["main.ts"] --> playgroundClass["index.ts (Playground)"]
   playgroundClass --> sceneMgr["SceneManager"]
   playgroundClass --> settingsUI["SettingsUI"]
   playgroundClass --> charLoad["CharacterLoader"]
-  sceneMgr --> managers["Managers and controllers"]
+  playgroundClass --> mpBoot["multiplayer_bootstrap"]
+
+  subgraph Managers [Managers and controllers]
+    direction LR
+    audio["AudioManager"]
+    hud["HUDManager"]
+    coll["CollectiblesManager"]
+    inv["InventoryManager"]
+    vfx["VisualEffectsManager"]
+    sky["SkyManager"]
+    cam["CameraManager"]
+    charCtl["CharacterController"]
+  end
+
+  subgraph Sync [Multiplayer sync modules]
+    direction LR
+    mpMgr["MultiplayerManager"]
+    charSync["character_sync"]
+    itemSync["item_sync / configured_items_sync"]
+    auth["item_authority_tracker"]
+    env["environment_physics_sync"]
+  end
+
+  sceneMgr --> Managers
   settingsUI --> switchEnv["switchToEnvironment"]
   switchEnv --> sceneMgr
+  switchEnv --> mpBoot
+  mpBoot --> Sync
+  Sync --> Managers
 ```

@@ -1,25 +1,31 @@
-# Serialization Quick Reference
+# Serialization quick reference
 
-**TL;DR:** All transforms are properly serialized, deserialized, and applied to meshes with full validation.
+> [!TIP]
+> For the full reference (pipeline diagrams, server-side validation rules, rationale), see [`SERIALIZATION_GUIDE.md`](SERIALIZATION_GUIDE.md). This page is a cheat-sheet for the common import + call patterns.
 
-> **Item / physics-object wire is pose-only.** Per Invariants P and E in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state), every `ItemInstanceState` row carries exactly two transform fields — `pos: readonly [number, number, number]` (world-space position) and `rot: readonly [number, number, number, number]` (unit quaternion `[x,y,z,w]`). No `matrix`, no Euler `rotation`, no `velocity`, and no `scale` on item paths. The Euler / quaternion serializers below are used by **character sync only**; item sync uses `sampleMeshPose` and `applyPoseToMesh` in `multiplayer_serialization.ts`.
+> [!IMPORTANT]
+> **Item paths are pose-only.** Per Invariants P and E in [`MULTIPLAYER_SYNCH.md §5.2`](MULTIPLAYER_SYNCH.md#52-item-state), every `ItemInstanceState` row carries exactly `pos: readonly [number, number, number]` (world-space position) and `rot: readonly [number, number, number, number]` (unit quaternion `[x,y,z,w]`). No `matrix`, no Euler `rotation`, no `velocity`, and no `scale` on item paths. The Euler / quaternion serializers below are used by **character sync only**; item sync uses `sampleMeshPose` and `applyPoseToMesh` in [`src/client/utils/multiplayer_serialization.ts`](src/client/utils/multiplayer_serialization.ts).
 
----
+## Contents
 
-## Quick Start
+- [Quick start](#quick-start)
+- [Wire formats](#wire-formats)
+- [Import paths](#import-paths)
+- [Bandwidth rough order](#bandwidth-rough-order)
+- [Validation at a glance](#validation-at-a-glance)
 
-### Character State
+## Quick start
+
+### Character state
+
 ```typescript
-// Sample from local player
 const state = characterSync.sampleState(Date.now());
-
-// Apply to remote character
 CharacterSync.applyRemoteCharacterState(remoteMesh, state);
 ```
 
-### Item State (pose-only, Invariant P)
+### Item state (pose-only, Invariant P)
+
 ```typescript
-// Owner: sample mesh pose, publish row.
 const pose = sampleMeshPose(presentMesh); // { pos: [x,y,z], rot: [x,y,z,w] }
 itemSync.updateItemState({
   instanceId: 'rv-life:present-1',
@@ -30,188 +36,92 @@ itemSync.updateItemState({
   timestamp: Date.now(),
 });
 
-// Non-owner: write pose directly onto the mesh; Havok pre-step syncs to body.
-ItemSync.applyRemoteItemState(itemMesh, itemState); // internally calls applyPoseToMesh
+ItemSync.applyRemoteItemState(itemMesh, itemState);
 ```
 
-### Light State
-```typescript
-// Track light
-lightsSync.updateLight({ lightType: 'POINT', position: [5,10,15], intensity: 1.0 });
+### Light state
 
-// Apply to light object
+```typescript
+lightsSync.updateLight({ lightType: 'POINT', position: [5, 10, 15], intensity: 1.0 });
 LightsSync.applyRemoteLightState(babylonLight, lightState);
 ```
 
----
-
-## Serialization Formats
+## Wire formats
 
 | Type | Format | Example | Used by |
 |------|--------|---------|---------|
 | Vector3 | `[x, y, z]` | `[10.5, 5.2, -15.3]` | characters, effects, lights |
 | Quaternion | `[x, y, z, w]` | `[0.1, 0.2, 0.3, 0.92]` | characters |
-| Euler (Radians) | `[x, y, z]` | `[0.1, 1.5, -0.2]` | characters (legacy; avoid on any new path) |
-| Item pose | `{ pos: [x,y,z], rot: [x,y,z,w] }` (7 floats total) | `{ pos: [10.5, 5.2, -15.3], rot: [0, 0.707, 0, 0.707] }` | **items / physics objects only** (Invariant P) |
+| Euler (radians) | `[x, y, z]` | `[0.1, 1.5, -0.2]` | characters (legacy; avoid on any new path) |
+| Item pose | `{ pos: [x,y,z], rot: [x,y,z,w] }` | `{ pos: [10.5, 5.2, -15.3], rot: [0, 0.707, 0, 0.707] }` | **items / physics objects only** (Invariant P) |
 | Color3 | `[r, g, b]` | `[1.0, 0.5, 0.2]` | all |
 | Color4 | `[r, g, b, a]` | `[1.0, 0.5, 0.2, 0.8]` | all |
 
----
+## Import paths
 
-## Validation Rules
+The repository does not configure a `@/` path alias; imports are always relative to the importing file. Examples below assume a caller in `src/client/**`.
 
-### Before Network Transfer
-- Vector3: Must be finite, within 10000 unit bounds
-- Euler: Must be finite, within [-2π, 2π] per axis
-- Color: Must be finite, components in [0, 1]
-- Timestamp: Must be recent (±30 seconds)
+### Serialization and deserialization helpers
 
-### After Network Transfer (Server)
-- Vector3: Check NaN/Infinity + bounds
-- Quaternion: Verify normalized (length ≈ 1.0)
-- Euler: Check NaN/Infinity + range
-- Color: Check NaN/Infinity + component range
-- Enums: Validate against allowed values
-
-### Application to Meshes
-- Position: Direct assignment with error handling
-- Rotation: Quaternion-aware with Euler fallback
-- Collections: Visibility binding (hidden if collected)
-- Lights: Type-specific property assignment
-
----
-
-## Common Functions
-
-### Serialization
 ```typescript
 import {
-  serializeVector3,      // Vector3 → [x, y, z]
-  serializeQuaternion,   // Quaternion → [x, y, z, w]
-  serializeColor3,       // Color3 → [r, g, b]
-  eulerToQuaternion,     // [x, y, z] → [x, y, z, w]
-  slerpQuaternion,       // Interpolate between quaternions
-} from '@/client/utils/multiplayer_serialization';
+  serializeVector3,
+  serializeQuaternion,
+  serializeColor3,
+  deserializeVector3,
+  deserializeQuaternion,
+  deserializeColor3,
+  eulerToQuaternion,
+  quaternionToEuler,
+  slerpQuaternion,
+  sampleMeshPose,
+  applyPoseToMesh,
+} from '../utils/multiplayer_serialization';
 ```
 
-### Deserialization
+### Validation helpers
+
 ```typescript
 import {
-  deserializeVector3,    // [x, y, z] → Vector3
-  deserializeQuaternion, // [x, y, z, w] → Quaternion
-  deserializeColor3,     // [r, g, b] → Color3
-  quaternionToEuler,     // [x, y, z, w] → [x, y, z]
-} from '@/client/utils/multiplayer_serialization';
+  isFiniteVector3,
+  isValidWorldPosition,
+  isValidEulerAngles,
+  isValidQuaternion,
+  isValidColor,
+  hasSignificantVector3Change,
+  hasSignificantAngleChange,
+  hasSignificantQuaternionChange,
+} from '../utils/multiplayer_serialization';
 ```
 
-### Validation
-```typescript
-import {
-  isFiniteVector3,              // Check for NaN/Infinity
-  isValidWorldPosition,         // Check bounds
-  isValidEulerAngles,          // Check range + finite
-  isValidQuaternion,           // Check normalization
-  isValidColor,                // Check components
-  hasSignificantVector3Change, // Change detection
-  hasSignificantAngleChange,   // Angle change detection
-  hasSignificantQuaternionChange, // Rotation change detection
-} from '@/client/utils/multiplayer_serialization';
-```
+### Mesh application entry points
 
-### Mesh Application
 ```typescript
-import { CharacterSync } from '@/client/sync/character_sync';
-import { ItemSync } from '@/client/sync/item_sync';
-import { LightsSync } from '@/client/sync/lights_sync';
+import { CharacterSync } from '../sync/character_sync';
+import { ItemSync } from '../sync/item_sync';
+import { LightsSync } from '../sync/lights_sync';
 
-// Apply character state
 CharacterSync.applyRemoteCharacterState(mesh, characterState);
-
-// Apply item state
 ItemSync.applyRemoteItemState(mesh, itemState);
-
-// Apply light state
 LightsSync.applyRemoteLightState(light, lightState);
 ```
 
----
+## Bandwidth rough order
 
-## Bandwidth
-
-| Entity Type | Update Size | Frequency | BW/Entity |
-|------------|-------------|-----------|-----------|
-| Character | ~300 bytes | 10-20 Hz | 3-6 KB/s |
-| Item | ~150 bytes | 1-5 Hz | 0.15-0.75 KB/s |
-| Light | ~200 bytes | 1-5 Hz | 0.2-1 KB/s |
-| Effect | ~100 bytes | 1-5 Hz | 0.1-0.5 KB/s |
+| Entity | Update size | Frequency | Bandwidth per entity |
+|--------|-------------|-----------|----------------------|
+| Character | ~300 bytes | 10–20 Hz | 3–6 KB/s |
+| Item | ~150 bytes | 1–5 Hz | 0.15–0.75 KB/s |
+| Light | ~200 bytes | 1–5 Hz | 0.2–1 KB/s |
+| Effect | ~100 bytes | 1–5 Hz | 0.1–0.5 KB/s |
 | Sky | ~150 bytes | <1 Hz | <0.15 KB/s |
 
----
+## Validation at a glance
 
-## Rotation Modes
+| Stage | Check |
+|-------|-------|
+| Pre-serialize (client) | Finite; position within ±10000; Euler within `[-2π, 2π]`; color components in `[0, 1]`; timestamp within ±30 s |
+| Server validation ([`src/server/multiplayer/utils.go`](src/server/multiplayer/utils.go)) | NaN / Infinity rejection; bounds check; quaternion normalization (length ≈ 1.0); enum validation (animation states); timestamp freshness |
+| Mesh application | Quaternion-first (`mesh.rotationQuaternion` — never Euler on item paths); safe fallback to disable on error |
 
-**Euler Angles [x, y, z] (radians)**
-- ✅ Used for network transmission
-- ✅ Native to Babylon.js mesh.rotation
-- ⚠️ Susceptible to gimbal lock
-- ✅ Converted to quaternion for interpolation
-
-**Quaternion [x, y, z, w]**
-- ✅ Used for smooth interpolation (SLERP)
-- ✅ Avoids gimbal lock
-- ✅ Normalized to unit length
-- ✅ Supported for mesh.rotationQuaternion
-
----
-
-## Error Scenarios
-
-| Error | Handling |
-|-------|----------|
-| NaN/Infinity | Caught by validation, rejected or clamped |
-| Out of bounds | Clamped to max 10000 units |
-| Denormalized quaternion | Auto-normalized on deserialize |
-| Gimbal lock | Automatically handled via quaternion conversion |
-| Invalid animation state | Rejected with enum validation |
-| Stale timestamp | Rejected if >30 seconds old |
-| Mesh application fails | Logged, continues (safe degradation) |
-
----
-
-## Integration Points
-
-### Current (Ready)
-- ✅ Serialization utilities
-- ✅ Type definitions
-- ✅ Sync module implementations
-- ✅ Server validation
-- ✅ Mesh application methods
-
-### TODO (Post-Deployment)
-- [ ] Wire into SceneManager
-- [ ] Create remote character meshes
-- [ ] Sync animation groups
-- [ ] Physics interpolation
-- [ ] Client-side prediction
-
----
-
-## Performance Tips
-
-1. **Throttle updates**: 50-100ms between samples
-2. **Detect changes**: Only send if significant
-3. **SLERP for rotation**: Smooth interpolation
-4. **Bulk updates**: Multiple entities per message
-5. **Validate early**: Reject bad data immediately
-
----
-
-## References
-
-- [Full Guide](./SERIALIZATION_GUIDE.md) - 862-line comprehensive reference
-- [Verification Report](./SERIALIZATION_VERIFICATION.md) - Audit trail
-- [Babylon.js Quaternion API](https://doc.babylonjs.com/typedoc/classes/BABYLON.Quaternion)
-
----
-
-**Status:** ✅ All serialization paths complete and validated. Ready for deployment.
+See [`SERIALIZATION_GUIDE.md`](SERIALIZATION_GUIDE.md) for the full rules, including error-scenario handling and interpolation strategy.

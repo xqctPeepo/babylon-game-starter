@@ -1,5 +1,8 @@
 # Babylon Game Starter - Multiplayer Implementation Guide
 
+> [!NOTE]
+> **Historical integration guide.** Superseded by [`MULTIPLAYER.md`](../../MULTIPLAYER.md) for onboarding and [`MULTIPLAYER_SYNCH.md`](../../MULTIPLAYER_SYNCH.md) for the normative spec. The "Phase 3: Integrate into SceneManager" steps below do not reflect the current code — multiplayer is wired via [`src/client/managers/multiplayer_bootstrap.ts`](../../src/client/managers/multiplayer_bootstrap.ts).
+
 ## Overview
 
 This guide walks through the multiplayer architecture implementation for babylon-game-starter using **Datastar** for real-time state synchronization.

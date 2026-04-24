@@ -1,5 +1,8 @@
 # Babylon Game Starter - Multiplayer Quick Start
 
+> [!NOTE]
+> **Historical onboarding doc.** Superseded by [`MULTIPLAYER.md`](../../MULTIPLAYER.md). This page still contains the legacy "Step 2: integrate with `SceneManager`" instructions — integration is now via [`src/client/managers/multiplayer_bootstrap.ts`](../../src/client/managers/multiplayer_bootstrap.ts) and the old steps do not apply.
+
 ## 30-Second Overview
 
 babylon-game-starter supports **multiplayer** with a **three-tier authority model**. Here's how it works:

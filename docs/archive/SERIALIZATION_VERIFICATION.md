@@ -1,7 +1,10 @@
 # Serialization & Deserialization Verification Report
 
-**Date:** April 20, 2026  
-**Status:** ✅ **COMPLETE & PRODUCTION READY**
+> [!NOTE]
+> **Historical audit.** This verification report reflects the state on April 20, 2026. Line counts, file totals, and some TODOs (e.g. "wire MultiplayerManager into SceneManager") do not match the current code — multiplayer integration is now via [`src/client/managers/multiplayer_bootstrap.ts`](../../src/client/managers/multiplayer_bootstrap.ts). `DEPLOYMENT_CHECKLIST.sh` referenced below was never committed. For the canonical serialization reference see [`SERIALIZATION_GUIDE.md`](../../SERIALIZATION_GUIDE.md).
+
+**Date:** April 20, 2026
+**Status (historical):** COMPLETE & PRODUCTION READY
 
 > **Item transform wire migrated to pose-only (Invariants P/E).** The wire format underwent two migrations: first from separate `position` / `rotation` fields to a unified `matrix` (row-major 4x4), and then — after the negative-scale decomposition trap surfaced ([MULTIPLAYER_SYNCH.md §B.11](MULTIPLAYER_SYNCH.md#b11-why-the-wire-ships-pos--rot-and-not-a-world-matrix)) — to the current pose-only format. `ItemInstanceState` on the wire now carries exactly two transform fields: `pos: [x,y,z]` (world-space position, 3 floats) and `rot: [x,y,z,w]` (unit quaternion, 4 floats). Scale is never replicated — every client spawns the mesh with identical local `scaling` from config. The Euler / quaternion helpers described below remain in use for **character sync**; item sync uses `sampleMeshPose(mesh)` and `applyPoseToMesh(mesh, pose)` in `multiplayer_serialization.ts`. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state).
 

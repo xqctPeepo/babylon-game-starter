@@ -1,24 +1,19 @@
-# Multiplayer Serialization & Deserialization Audit
+# Multiplayer serialization and deserialization
 
-**Version:** 1.0  
-**Last Updated:** 2026-04-20  
-**Status:** ✅ Comprehensive & Production-Ready
+This document is the complete reference for serialization, deserialization, and mesh-transform application in the multiplayer client.
 
-This document provides a complete reference for serialization, deserialization, and mesh transform application in the multiplayer system.
+> [!IMPORTANT]
+> **Item paths are pose-only.** Every `ItemInstanceState` row on the wire carries exactly two transform fields — `pos` (3 floats, world-space position) and `rot` (4 floats, unit quaternion `[x,y,z,w]`) — per Invariants P and E in [`MULTIPLAYER_SYNCH.md §5.2`](MULTIPLAYER_SYNCH.md#52-item-state). Owners sample via `sampleMeshPose(mesh)`; non-owners apply via `applyPoseToMesh(mesh, pose)`. There is no `matrix`, spelled-out `position`, Euler `rotation`, `velocity`, or `scale` field on item paths. The Euler / quaternion serializers described elsewhere in this doc are used by **character sync only**.
 
-> **Item / physics-object paths are pose-only** (Invariants P and E in [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state)). Every `ItemInstanceState` row on the wire carries two transform fields: `pos` (3 floats, world-space position) and `rot` (4 floats, unit quaternion `[x,y,z,w]`). Owners sample via `sampleMeshPose(mesh)`; non-owners apply via `applyPoseToMesh(mesh, pose)`. No `matrix`, `position` (spelled out), Euler `rotation`, `velocity`, or `scale` fields on item paths. The Euler / quaternion serializers described elsewhere in this doc are used by **character sync only**.
+## Contents
 
----
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Serialization Formats](#serialization-formats)
-3. [Client-Side Pipeline](#client-side-pipeline)
-4. [Server-Side Validation](#server-side-validation)
-5. [Mesh Application Methods](#mesh-application-methods)
-6. [Common Issues & Solutions](#common-issues--solutions)
-7. [Checklist](#checklist)
+- [Overview](#overview)
+- [Serialization formats](#serialization-formats)
+- [Client-side pipeline](#client-side-pipeline)
+- [Server-side validation](#server-side-validation)
+- [Mesh application methods](#mesh-application-methods)
+- [Common issues and solutions](#common-issues--solutions)
+- [Checklist](#checklist)
 
 ---
 
@@ -433,7 +428,8 @@ static applyRemoteCharacterState(
 ```
 
 **Expected Result:**
-```
+
+```text
 Before: remoteMesh.position = [0, 0, 0], remoteMesh.rotation.y = 0
 After:  remoteMesh.position = [10.5, 5.2, -15.3], remoteMesh.rotation.y = 1.5
 ```
@@ -690,7 +686,7 @@ multiplayerManager.on('character-state-update', (update) => {
 
 ## Checklist
 
-### ✅ Serialization Completeness
+### Serialization completeness
 
 - [x] Vector3 serialization: `[x, y, z]`
 - [x] Quaternion serialization: `[x, y, z, w]`
@@ -703,7 +699,7 @@ multiplayerManager.on('character-state-update', (update) => {
 - [x] ParticleEffectState includes all fields
 - [x] SkyEffectState includes all fields
 
-### ✅ Deserialization Safety
+### Deserialization safety
 
 - [x] Vector3 deserialization with bounds check
 - [x] Quaternion deserialization with normalization
@@ -713,7 +709,7 @@ multiplayerManager.on('character-state-update', (update) => {
 - [x] Animation state validation
 - [x] Boost type validation
 
-### ✅ Mesh Application
+### Mesh application
 
 - [x] Character position application
 - [x] Character rotation application (Euler + Quaternion support)
@@ -725,7 +721,7 @@ multiplayerManager.on('character-state-update', (update) => {
 - [x] Light position/direction application
 - [x] Light type-specific properties applied
 
-### ✅ Error Handling
+### Error handling
 
 - [x] Try-catch around all mesh assignments
 - [x] Validation before network transmission
@@ -733,7 +729,7 @@ multiplayerManager.on('character-state-update', (update) => {
 - [x] Logging for failed applications
 - [x] Safe fallbacks for invalid data
 
-### ✅ Validation Layers
+### Validation layers
 
 **Client-Side (Pre-Network):**
 - [x] `isFiniteVector3()` - Checks for NaN/Infinity
@@ -752,7 +748,7 @@ multiplayerManager.on('character-state-update', (update) => {
 - [x] `validateLightType()` - Enum check
 - [x] `validateBoostType()` - Enum check
 
-### ✅ Performance Optimization
+### Performance optimization
 
 - [x] Throttled state sampling (50-100ms)
 - [x] Significant change detection (position, rotation, animation)
@@ -760,7 +756,7 @@ multiplayerManager.on('character-state-update', (update) => {
 - [x] Array serialization (minimal JSON overhead)
 - [x] Direct mesh assignment (no intermediate objects)
 
-### ✅ Type Safety
+### Type safety
 
 - [x] `Vector3Serializable` type defined
 - [x] `QuaternionSerializable` type defined
@@ -771,91 +767,24 @@ multiplayerManager.on('character-state-update', (update) => {
 
 ---
 
-## Integration Checklist
+## Integration
 
-### TODO: SceneManager Integration
-
-```typescript
-// In SceneManager.loadEnvironment():
-
-// Setup multiplayer hooks when environment loads
-const multiplayerManager = MultiplayerManager.getInstance();
-
-// Listen for character updates
-multiplayerManager.on('character-state-update', (update: CharacterStateUpdate) => {
-  for (const charState of update.updates) {
-    const remoteMesh = this.getOrCreateRemoteCharacter(charState.clientId);
-    CharacterSync.applyRemoteCharacterState(remoteMesh, charState);
-  }
-});
-
-// Listen for item updates
-multiplayerManager.on('item-state-update', (update: ItemStateUpdate) => {
-  for (const itemState of update.updates) {
-    const itemMesh = this.getRemoteItemMesh(itemState.instanceId);
-    if (itemMesh) {
-      ItemSync.applyRemoteItemState(itemMesh, itemState);
-    }
-  }
-});
-```
-
-### TODO: Animation Frame Tracking
-
-```typescript
-// In CharacterController.updateAnimation():
-const characterSync = new CharacterSync(clientId);
-
-// Sample current animation progress
-const animGroup = this.getCurrentAnimationGroup();
-if (animGroup) {
-  const normalizedFrame = animGroup.speedRatio / animGroup.to;
-  // Include in character state sampling
-}
-```
-
-### TODO: Physics Velocity Interpolation
-
-```typescript
-// Remote character velocity handling
-const lastPos = previousState.position;
-const currentPos = state.position;
-const dt = (state.timestamp - previousTimestamp) / 1000;
-
-// Server sends velocity, but we can also calculate from positions
-const calculatedVelocity = [
-  (currentPos[0] - lastPos[0]) / dt,
-  (currentPos[1] - lastPos[1]) / dt,
-  (currentPos[2] - lastPos[2]) / dt
-];
-
-// Use for smoother interpolation
-```
-
----
+Multiplayer integration is wired in [`src/client/managers/multiplayer_bootstrap.ts`](src/client/managers/multiplayer_bootstrap.ts), which subscribes to every SSE signal and routes remote state into the sync modules documented above. Extending multiplayer state typically means either adding a new `src/client/sync/` module with its own `sampleState` / `applyRemoteState` pair, or extending an existing module and adding a listener inside the bootstrap. See [`MULTIPLAYER.md`](MULTIPLAYER.md#how-the-client-is-wired) for the end-to-end picture.
 
 ## References
 
-- **Babylon.js Quaternion API:** https://doc.babylonjs.com/typedoc/classes/BABYLON.Quaternion
-- **Euler Angles:** https://en.wikipedia.org/wiki/Euler_angles
-- **Gimbal Lock:** https://en.wikipedia.org/wiki/Gimbal_lock
-- **SLERP:** https://en.wikipedia.org/wiki/Slerp
-- **Network Serialization Best Practices:** https://gafferongames.com/post/snapshot_compression/
+- [Babylon.js `Quaternion` API](https://doc.babylonjs.com/typedoc/classes/BABYLON.Quaternion)
+- [Euler angles](https://en.wikipedia.org/wiki/Euler_angles)
+- [Gimbal lock](https://en.wikipedia.org/wiki/Gimbal_lock)
+- [SLERP](https://en.wikipedia.org/wiki/Slerp)
+- [Snapshot compression (Gaffer on Games)](https://gafferongames.com/post/snapshot_compression/)
 
----
+## Troubleshooting
 
-## Questions & Support
+For issues with serialization or deserialization:
 
-For issues with serialization/deserialization:
-
-1. Check server logs for validation failures: `src/server/multiplayer/utils.go`
-2. Check client console for application failures: `[CharacterSync]`, `[ItemSync]`, `[LightsSync]` prefixes
-3. Verify data with `SERIALIZATION_AUDIT()` function (see test utilities)
-4. Check RFC timestamps are within 30 seconds of server time
-5. Ensure rotations are in radians, not degrees
-
----
-
-**Status:** ✅ Complete & Ready for Production  
-**Last Verified:** 2026-04-20 14:30 UTC  
-**Next Review:** After first deployment to Render
+1. Check server logs for validation failures ([`src/server/multiplayer/utils.go`](src/server/multiplayer/utils.go)).
+2. Check the browser console for application failures — the `[CharacterSync]`, `[ItemSync]`, and `[LightsSync]` prefixes are the relevant ones.
+3. Confirm timestamps are within 30 seconds of server time; the server rejects older payloads.
+4. Confirm rotations are in **radians**, not degrees.
+5. Confirm item payloads carry `{ pos, rot }` only — no `matrix`, `rotation` (Euler), `velocity`, or `scale` on the item wire (Invariant P).

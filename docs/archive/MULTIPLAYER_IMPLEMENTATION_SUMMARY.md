@@ -1,6 +1,9 @@
 # Multiplayer Implementation - Complete Summary
 
-## 🎯 Objective
+> [!NOTE]
+> **Historical narrative.** This was the "press release" summary written at multiplayer launch. Superseded by [`MULTIPLAYER_SYNCH.md`](../../MULTIPLAYER_SYNCH.md) (normative spec) and [`MULTIPLAYER.md`](../../MULTIPLAYER.md) (onboarding). File inventories below have drifted from the current source tree.
+
+## Objective
 
 Transform babylon-game-starter into a **multiplayer-capable game** using Datastar for real-time state synchronization, with a **three-tier authority model**:
 

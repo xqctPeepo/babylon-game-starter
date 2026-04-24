@@ -7,7 +7,26 @@
 | **Encoding** | JSON (`application/json`; UTF-8) |
 | **Primary transport** | HTTPS + Server-Sent Events (SSE) |
 
+> [!IMPORTANT]
+> This is the **normative** multiplayer specification — the source of truth for wire shapes, authority rules, and server/client obligations. For an onboarding walkthrough and debugging playbook, see [`MULTIPLAYER.md`](MULTIPLAYER.md). Where the two disagree, this document wins.
+
 This specification defines the **application-level contract** between the Babylon Game Starter multiplayer client and the Go multiplayer service. Deployment, build tooling, and editor setup are **non-normative** and appear only in [§10 Informative references](#10-informative-references-non-normative).
+
+## Contents
+
+- [Conformance](#conformance)
+- [1. Goals and scope](#1-goals-and-scope)
+- [2. Terms and definitions](#2-terms-and-definitions)
+- [3. Protocol overview](#3-protocol-overview)
+- [4. Session lifecycle (HTTP)](#4-session-lifecycle-http)
+- [5. State messages (HTTP ingress)](#5-state-messages-http-ingress)
+- [6. SSE signals (normative payloads)](#6-sse-signals-normative-payloads)
+- [7. Security model](#7-security-model)
+- [8. Data shapes (TypeScript reference alignment)](#8-data-shapes-typescript-reference-alignment)
+- [9. Operational requirements (development proxies)](#9-operational-requirements-development-proxies)
+- [10. Informative references (non-normative)](#10-informative-references-non-normative)
+- [Appendix A. Implementation conformance checklist](#appendix-a-implementation-conformance-checklist)
+- [Appendix B. Item-sync state machines and interaction diagrams (implementation patterns)](#appendix-b-item-sync-state-machines-and-interaction-diagrams-implementation-patterns)
 
 ---
 
@@ -214,7 +233,7 @@ stateDiagram-v2
 4. **Disconnect failover.** On `client-left` or session disposal for `client_id = X`, the server MUST transition every `instanceId` with an explicit owner of `X` to `Unowned` and MUST emit `item-authority-changed` with `reason = "disconnect"` and `newOwnerId = null` for each. Items fall back to env-authority; env-authority failover itself is handled separately per [§4.8](#48-environment-item-authority-lifecycle).
 5. **Environment boundary.** When the server observes the explicit owner changing environment (character-state `environmentName` differs from the one in which the `instanceId` lives), the server MAY transition `I` to `Unowned` with `reason = "env_switch"`. Clients MUST tolerate this signal arriving at any time; the item again falls back to env-authority.
 6. **Activity tracking.** An accepted `item-state-update` row referencing `instanceId = I` MUST refresh `lastUpdatedAt` on the server-side `itemOwners` entry for `I`. A claim refresh from the current owner ([§5.6](#56-item-authority-claim)) likewise refreshes `lastUpdatedAt`.
-7. **Proximity claim emission.** Clients SHOULD emit claims when their character display capsule enters the item's configured `claimRadiusMeters` bubble, to ensure the body is already `DYNAMIC` locally before collision. Clients SHOULD emit a release after `claimGraceMs` of continuous non-proximity with body at rest. Both thresholds are implementation-defined tunables — reference values: `claimRadiusMeters = 2.5`, `claimGraceMs = 3000`, `claimIdleTimeoutMs = 1500`.
+7. **Proximity claim emission.** Clients SHOULD emit claims when their character display capsule enters the item's configured `claimRadiusMeters` bubble, to ensure the body is already `DYNAMIC` locally before collision. Clients SHOULD emit a release after `claimGraceMs` of continuous non-proximity with body at rest. Both thresholds are implementation-defined tunables. The canonical values for the reference client live in [`src/client/config/game_config.ts`](src/client/config/game_config.ts) under `MULTIPLAYER.CLAIM_RADIUS_METERS`, `MULTIPLAYER.CLAIM_GRACE_MS`, and `MULTIPLAYER.CLAIM_IDLE_TIMEOUT_MS`. Any numeric example in this document that disagrees with `game_config.ts` is stale; the config file is authoritative.
 8. **Scope.** Per-item authority applies to:
    - `environment.physicsObjects` entries with `mass > 0`, and
    - `environment.items` entries with `collectible: false`.
@@ -868,11 +887,13 @@ These are non-normative because an uncompressed SSE stream is a conforming imple
 
 | Topic | Location |
 |-------|-----------|
-| Integration guide, Datastar overview, config | [MULTIPLAYER_INTEGRATION.md](MULTIPLAYER_INTEGRATION.md) |
-| Quick start | [MULTIPLAYER_QUICK_START.md](MULTIPLAYER_QUICK_START.md) |
-| Implementation notes | [MULTIPLAYER_IMPLEMENTATION_SUMMARY.md](MULTIPLAYER_IMPLEMENTATION_SUMMARY.md) |
+| Onboarding / operations / troubleshooting | [`MULTIPLAYER.md`](MULTIPLAYER.md) |
+| Serialization rules and mesh-apply helpers | [`SERIALIZATION_GUIDE.md`](SERIALIZATION_GUIDE.md) |
+| Historical design notes (pre-consolidation) | [`docs/archive/`](docs/archive/) |
 | Go server entry | [`src/server/multiplayer/main.go`](src/server/multiplayer/main.go) |
 | Go handlers | [`src/server/multiplayer/handlers.go`](src/server/multiplayer/handlers.go) |
+| Go authority state | [`src/server/multiplayer/item_authority.go`](src/server/multiplayer/item_authority.go) |
+| Client bootstrap / wiring | [`src/client/managers/multiplayer_bootstrap.ts`](src/client/managers/multiplayer_bootstrap.ts) |
 | Client orchestration | [`src/client/managers/multiplayer_manager.ts`](src/client/managers/multiplayer_manager.ts) |
 
 **Academic and industrial lineage of the per-client freshness matrix ([§5.2.2](#522-per-client-freshness-matrix))**
@@ -916,39 +937,64 @@ Until any of the above features is required, boolean cells are strictly sufficie
 
 ## Appendix A. Implementation conformance checklist
 
-| Requirement | Reference client status |
-|-------------|-------------------------|
-| `PATCH` for state endpoints | Satisfied (`datastarClient.patch`) |
-| `characterModelId` on every `CharacterState` | Satisfied ([`multiplayer.ts`](src/client/types/multiplayer.ts), sampling in [`multiplayer_bootstrap.ts`](src/client/managers/multiplayer_bootstrap.ts) / [`character_sync.ts`](src/client/sync/character_sync.ts); server rejects empty — [`handlers.go`](src/server/multiplayer/handlers.go)) |
-| Peer avatars load GLB by `characterModelId` | Satisfied — [`remote_peer_proxy.ts`](src/client/managers/remote_peer_proxy.ts) imports the asset named in `characterModelId`, falls back to a box if unknown/failed |
-| Global world state only from base synchronizer ([§7.2](#72-global-world-state-authorization)) | Satisfied (client guard + server check) for effects/lights/sky effects |
-| Per-row authorization by resolved owner ([§7.5](#75-item-authority-authorization)) | Pending — server currently enforces only the explicit-owner tier; env-authority default and its replay are planned for the env-item-authority implementation follow-up |
-| `item-authority-changed` signal emission on every explicit-ownership transition ([§6.8](#68-item-authority-changed)) | Implemented — emitted on claim/release/disconnect/idle_timeout; SSE bootstrap replay of `itemOwners` implemented |
-| Server assigns env-authority on first-in-env ([§4.8](#48-environment-item-authority-lifecycle)) | Pending — requires `envAuthority` and `envArrivalOrder` maps in the multiplayer server |
-| Server fails env-authority over to next-earliest arrival on leave/disconnect/env-switch ([§4.8](#48-environment-item-authority-lifecycle)) | Pending — requires the failover arbiter above |
-| Unclaimed item rows accepted only from env-authority of the row's env ([§7.5](#75-item-authority-authorization)) | Pending — follows server env-authority implementation |
-| `env-item-authority-changed` signal emission and SSE bootstrap replay ([§6.9](#69-env-item-authority-changed)) | Pending |
-| Client emits proximity claim before collision ([§4.7](#47-item-authority-lifecycle)) | Implemented — [`proximity_claim_observer.ts`](src/client/sync/proximity_claim_observer.ts) |
-| Client runs dynamic physics for every item whose resolved owner is self (explicit OR env-authority) | Pending — client currently flips motion type only on explicit authority; env-authority tier wiring is part of the env-item-authority implementation follow-up |
-| Server-side `itemTransformCache` dirty filter — broadcast only rows whose fields changed beyond epsilon ([§5.2.1](#521-global-dirty-filter-server-side-transform-cache)) | Pending — current server rebroadcasts every accepted row regardless of delta |
-| Server maintains `freshness[E][I][X]` boolean matrix per environment ([§5.2.2](#522-per-client-freshness-matrix) rule 1) | Pending |
-| Owner-pin invariant: `freshness[E][I][resolvedOwner(I)] = fresh` at all times; resolved owner receives no `updates` rows for `I` ([§5.2.2](#522-per-client-freshness-matrix) rule 2) | Pending |
-| Dirty-broadcast projection: DIRTY row sets all non-owner in-env cells to `stale` then flips each to `fresh` after per-session enqueue ([§5.2.2](#522-per-client-freshness-matrix) rule 3) | Pending |
-| AOI enter rehydrates: env entry seeds all in-env cells for the arriving client to `stale`, producing one full per-env `item-state-update` bootstrap burst ([§5.2.2](#522-per-client-freshness-matrix) rule 4, [§6.2](#62-item-state-update) *Bootstrap on environment entry*) | Pending — replaces prior SSE-open-replay path |
-| AOI leave evicts: env exit, disconnect, or env-switch evicts `freshness[E][*][leaver]` ([§5.2.2](#522-per-client-freshness-matrix) rule 5) | Pending |
-| Ownership transition re-seats owner pin and marks previous owner's cell `stale` ([§5.2.2](#522-per-client-freshness-matrix) rule 6) | Pending |
-| Collection events delivered to every in-env non-sender regardless of freshness state, terminally and idempotently ([§5.2.2](#522-per-client-freshness-matrix) rule 7) | Pending |
-| Orphan reassignment on env-authority failover: next arrival becomes resolved owner of all affected items in the same server tick as the `env-item-authority-changed` emission ([§4.8](#48-environment-item-authority-lifecycle) rule 8) | Pending |
-| Orphan reassignment on explicit owner leave: explicit entry cleared, resolved owner falls back to env-authority, freshness re-pinned without manufacturing a claim ([§4.7](#47-item-authority-lifecycle) *Orphan reassignment on leave*) | Pending |
-| Receiver: `collections[]` processed independently of `updates[]`; collection hides the item even if no `ItemInstanceState` row is present ([§6.2](#62-item-state-update) Receiver rule 1) | Pending |
-| Receiver: drops `updates[]` rows for self-owned items as defense-in-depth ([§6.2](#62-item-state-update) Receiver rule 2) | Pending |
-| Receiver: non-owned rows applied via kinematic target only; no velocity/impulse/force on non-owned bodies ([§4.7](#47-item-authority-lifecycle) *Timing invariants*, [§6.2](#62-item-state-update) Receiver rule 3) | Pending |
-| Receiver: env-entry seed-before-tick holds local physics kinematic until the bootstrap `item-state-update` has been applied ([§4.8](#48-environment-item-authority-lifecycle) *Env-entry seed-before-tick*, [§6.2](#62-item-state-update) Receiver rule 4) | Pending |
-| Receiver: remote-collect feedback parity — receivers play the collection particle burst and spatialized collection sound on `collections[]` for a still-present local representation, and MUST NOT emit any scoring side-effect in response ([§6.2](#62-item-state-update) Receiver rule 1 *Remote-collect feedback parity*) | Pending |
-| Receiver: newcomer-ANIMATED-default-with-reeval — on env entry every in-env item is seeded to `ANIMATED`, promotion to `DYNAMIC` is permitted only after an applied authority signal names self as resolved owner, and motion type is re-derived atomically per-item on each of: `item-authority-changed`, `env-item-authority-changed`, or authority-snapshot application ([§6.2](#62-item-state-update) Receiver rules 4 and 5, [§4.8](#48-environment-item-authority-lifecycle) *No-authority-means-non-owner*) | Pending |
-| Activity tracking (`itemOwners.lastUpdatedAt`) refreshed even for CLEAN rows that are dropped from broadcast ([§5.2.1](#521-global-dirty-filter-server-side-transform-cache)) | Pending |
+This appendix is informative; normative text is in sections [§1](#conformance)–[§9](#9-operational-requirements-development-proxies). The status column reflects the state of the reference client + Go server in this repository.
 
-This appendix is informative; normative text is in sections [§1](#conformance)–[§9](#9-operational-requirements-development-proxies).
+### Transport and session
+
+| Requirement | Status |
+|-------------|--------|
+| `PATCH` for state endpoints | Satisfied ([`datastar_client.ts`](src/client/datastar/datastar_client.ts)) |
+| SSE stream on `GET /api/multiplayer/stream` with Brotli transport compression and per-event flush ([§4.4](#44-server-sent-event-stream), [§9.1](#91-sse-transport-compression-non-normative)) | Satisfied ([`compression.go`](src/server/multiplayer/compression.go), [`handlers.go`](src/server/multiplayer/handlers.go) `handleSSE`) |
+| `characterModelId` on every `CharacterState` | Satisfied ([`multiplayer.ts`](src/client/types/multiplayer.ts), sampling in [`multiplayer_bootstrap.ts`](src/client/managers/multiplayer_bootstrap.ts) / [`character_sync.ts`](src/client/sync/character_sync.ts); server rejects empty in [`handlers.go`](src/server/multiplayer/handlers.go)) |
+| Peer avatars load GLB by `characterModelId` | Satisfied ([`remote_peer_proxy.ts`](src/client/managers/remote_peer_proxy.ts) — imports the asset named in `characterModelId`, falls back to a box if unknown/failed) |
+
+### Authority and security
+
+| Requirement | Status |
+|-------------|--------|
+| Global world state only from base synchronizer ([§7.2](#72-global-world-state-authorization)) | Satisfied (client guard + server check) for effects / lights / sky effects |
+| Per-row authorization by resolved owner: explicit tier, then env-authority tier, else drop ([§7.5](#75-item-authority-authorization)) | Satisfied ([`handlers.go`](src/server/multiplayer/handlers.go) `handleItemStateUpdate` resolves `itemOwners[iid]` → `envAuthority[env]` → reject) |
+| `item-authority-changed` signal emission on every explicit-ownership transition ([§6.8](#68-item-authority-changed)) | Satisfied — emitted on claim / release / disconnect / idle timeout; SSE bootstrap replay of `itemOwners` in [`pushAuthoritySnapshotToSession`](src/server/multiplayer/item_authority.go) |
+| Server assigns env-authority on first-in-env with FIFO arrival order ([§4.8](#48-environment-item-authority-lifecycle)) | Satisfied (`envAuthority` + `envClientOrder` maps in [`main.go`](src/server/multiplayer/main.go); arrival-ordered failover in [`handlers.go`](src/server/multiplayer/handlers.go) `handleLeave` and `handleEnvSwitch`) |
+| Server fails env-authority over to next-earliest arrival on leave / disconnect / env-switch ([§4.8](#48-environment-item-authority-lifecycle)) | Satisfied (same as above; emits `env-item-authority-changed` with `reason` = `"failover"` / `"disconnect"` / `"env_switch"`) |
+| `env-item-authority-changed` signal emission and SSE bootstrap replay ([§6.9](#69-env-item-authority-changed)) | Satisfied ([`pushAuthoritySnapshotToSession`](src/server/multiplayer/item_authority.go) replays one event per active env on SSE open) |
+| Client emits proximity claim before collision ([§4.7](#47-item-authority-lifecycle)) | Satisfied ([`proximity_claim_observer.ts`](src/client/sync/proximity_claim_observer.ts)) |
+| Client runs dynamic physics for every item whose resolved owner is self (explicit OR env-authority) | Satisfied ([`item_authority_tracker.ts`](src/client/sync/item_authority_tracker.ts) + [`collectibles_manager.ts`](src/client/managers/collectibles_manager.ts) `setItemKinematic`) |
+| Orphan reassignment on explicit owner leave: explicit entry cleared, resolved owner falls back to env-authority ([§4.7](#47-item-authority-lifecycle) *Orphan reassignment on leave*) | Satisfied ([`item_authority.go`](src/server/multiplayer/item_authority.go) `releaseItemsOwnedBy`; `env-item-authority-changed` follow-up if env-authority also transferred) |
+
+### Dirty filter and broadcast
+
+| Requirement | Status |
+|-------------|--------|
+| Server-side `itemTransformCache` dirty filter — broadcast only rows whose fields changed beyond epsilon ([§5.2.1](#521-global-dirty-filter-server-side-transform-cache)) | Satisfied ([`handlers.go`](src/server/multiplayer/handlers.go) `isDirtyRow` using `posEpsilon` and absolute quaternion dot product; `updateTransformCache` refreshes the cache) |
+| Activity tracking (`itemOwners.lastUpdatedAt`) refreshed even for CLEAN rows that are dropped from broadcast ([§5.2.1](#521-global-dirty-filter-server-side-transform-cache)) | Satisfied (`handleItemStateUpdate` refreshes `LastUpdatedAt` for explicit-owner rows regardless of dirty state) |
+| Server never echoes a resolved owner's own rows back to them | Partially satisfied via `broadcastExcept(senderSessionID, …)` — works when the resolved owner is the sender. The full owner-pin invariant for multi-hop scenarios (reconnect races, multi-session clients) requires the per-client freshness matrix below. Defense-in-depth drop lives on the client ([§6.2](#62-item-state-update) Receiver rule 1). |
+
+### Per-client freshness matrix (not yet implemented)
+
+The reference server currently broadcasts accepted dirty rows to every session except the sender. The finer-grained §5.2.2 matrix is a planned follow-up; bootstrapping is currently done via the separate per-session authority + cache replay path on SSE open. The rows below remain normative targets.
+
+| Requirement | Status |
+|-------------|--------|
+| Server maintains `freshness[E][I][X]` boolean matrix per environment ([§5.2.2](#522-per-client-freshness-matrix) rule 1) | Pending |
+| Owner-pin invariant enforced via freshness cells (not just `broadcastExcept`) ([§5.2.2](#522-per-client-freshness-matrix) rule 2) | Pending — see *Partially satisfied* row above |
+| Dirty-broadcast projection flips non-owner cells `stale`, then `fresh` after enqueue ([§5.2.2](#522-per-client-freshness-matrix) rule 3) | Pending |
+| AOI enter rehydrates via freshness-seeded bootstrap ([§5.2.2](#522-per-client-freshness-matrix) rule 4) | Partially satisfied — separate bootstrap path in [`pushAuthoritySnapshotToSession`](src/server/multiplayer/item_authority.go) replays `itemTransformCache` on SSE open; normative target is the freshness-seeded per-window bootstrap |
+| AOI leave evicts `freshness[E][*][leaver]` ([§5.2.2](#522-per-client-freshness-matrix) rule 5) | Pending |
+| Ownership transition re-seats owner pin and marks previous owner's cell `stale` ([§5.2.2](#522-per-client-freshness-matrix) rule 6) | Pending |
+| Collection events delivered to every in-env non-sender regardless of freshness state, terminally and idempotently ([§5.2.2](#522-per-client-freshness-matrix) rule 7) | Partially satisfied — `handleItemStateUpdate` forwards `collections[]` to every other client via `broadcastExcept`; normative target ties this into the freshness-matrix fan-out producer |
+| Orphan reassignment on env-authority failover with freshness re-pin in the same tick as `env-item-authority-changed` emission ([§4.8](#48-environment-item-authority-lifecycle) rule 8) | Pending |
+
+### Receiver contract (client)
+
+| Requirement | Status |
+|-------------|--------|
+| Receiver: `collections[]` processed independently of `updates[]`; collection hides the item even if no `ItemInstanceState` row is present ([§6.2](#62-item-state-update) Receiver rule 1) | Satisfied ([`multiplayer_bootstrap.ts`](src/client/managers/multiplayer_bootstrap.ts) item-state-update handler iterates `collections[]` before `updates[]`) |
+| Receiver: remote-collect feedback parity — particle burst + spatialized sound on `collections[]` for still-present local representation; no scoring side-effects ([§6.2](#62-item-state-update) Receiver rule 1 *Remote-collect feedback parity*) | Satisfied ([`collectibles_manager.ts`](src/client/managers/collectibles_manager.ts) `applyRemoteCollectedWithFeedback`) |
+| Receiver: drops `updates[]` rows for self-owned items as defense-in-depth ([§6.2](#62-item-state-update) Receiver rule 2) | Satisfied (`isOwnedBySelf` check before apply) |
+| Receiver: non-owned rows applied via mesh-direct write (`applyPoseToMesh`); no velocity / impulse / force on non-owned bodies ([§4.7](#47-item-authority-lifecycle) *Timing invariants*, [§6.2](#62-item-state-update) Receiver rule 3, [§B.9](#b9-kinematic-apply-pattern-mesh-direct-writes-vs-settargettransform)) | Satisfied ([`item_sync.ts`](src/client/sync/item_sync.ts) `applyRemoteItemState` short-circuits on `DYNAMIC` bodies and writes `mesh.position` / `mesh.rotationQuaternion` on `ANIMATED` bodies; `collectibles_manager.ts` `setItemKinematic` keeps `disablePreStep = false` for kinematic replicas) |
+| Receiver: env-entry seed-before-tick holds local physics kinematic until the bootstrap `item-state-update` has been applied ([§4.8](#48-environment-item-authority-lifecycle) *Env-entry seed-before-tick*, [§6.2](#62-item-state-update) Receiver rule 4) | Satisfied ([`multiplayer_bootstrap.ts`](src/client/managers/multiplayer_bootstrap.ts) env-switch and render-loop latch; [`configured_items_sync.ts`](src/client/sync/configured_items_sync.ts) defers apply until the env matches) |
+| Receiver: newcomer-ANIMATED-default-with-reeval — promotion to `DYNAMIC` only after an applied authority signal names self as resolved owner; motion type re-derived on `item-authority-changed`, `env-item-authority-changed`, and authority-snapshot application ([§6.2](#62-item-state-update) Receiver rules 4 and 5, [§4.8](#48-environment-item-authority-lifecycle) *No-authority-means-non-owner*) | Satisfied (`applyMotionTypeForInstance` wired to all three triggers in [`multiplayer_bootstrap.ts`](src/client/managers/multiplayer_bootstrap.ts); pre-scene authority application per [§4.8](#48-environment-item-authority-lifecycle) Invariant P in `MultiplayerManager.switchEnvironment`) |
 
 ---
 
@@ -976,13 +1022,13 @@ sequenceDiagram
 
   Note over S,P2: Bootstrap burst (ordered)
   S-->>P2: signal env-item-authority-changed  {clientId: P1, environmentName: "RV Life"}
-  S-->>P2: signal item-state-update  {updates: [...16-float matrices...]}
+  S-->>P2: signal item-state-update  {updates: [...pose rows {pos:[3], rot:[4]}...]}
 
   Note over P2: seedMotionTypesForEnv("RV Life")<br/>→ every item body → ANIMATED
   Note over P2: applyItemSnapshot(snapshot)<br/>→ applyPoseToMesh per item (see §B.9)
 
   loop Every tick (P1 is env-authority)
-    P1->>S: PATCH item-state-update  {rows: [...dirty rows...]}
+    P1->>S: PATCH /api/multiplayer/item-state  {updates: [...dirty rows...]}
     S-->>P2: signal item-state-update  {updates: [...]}
     Note over P2: applyRemoteConfiguredItemState<br/>→ applyPoseToMesh on ANIMATED body
   end
@@ -1067,9 +1113,7 @@ stateDiagram-v2
 
   Animated --> Animated : applyRemoteConfiguredItemState\napplyPoseToMesh(pos, rot)\n[pre-step syncs mesh→body; see B.9]
 
-  Dynamic --> Publishing : Every publish tick\nincludeRow → true\nPATCH item-state-update
-
-  Publishing --> Dynamic : tick completes
+  Dynamic --> Dynamic : Publish tick\nincludeRow → true\nPATCH /api/multiplayer/item-state
 
   Dynamic --> Collected : collectedBy = self\nOR remote collection event
   Animated --> Collected : remote collection signal received
@@ -1083,7 +1127,7 @@ stateDiagram-v2
 
 ### B.5 Server-side item state publish gate
 
-The server runs two independent filters before broadcasting any row from a `PATCH item-state-update` request.
+The server runs two independent filters before broadcasting any row from a `PATCH /api/multiplayer/item-state` request. (`item-state-update` is the SSE signal name; the HTTP path is `item-state`.)
 
 ```mermaid
 flowchart TD
@@ -1180,7 +1224,7 @@ sequenceDiagram
 
 ### B.8 Item publish-gate: client-side includeRow decision
 
-Before sending any row in a `PATCH item-state-update`, the client evaluates three conditions in sequence.
+Before sending any row in a `PATCH /api/multiplayer/item-state` request, the client evaluates three conditions in sequence.
 
 ```mermaid
 flowchart TD
@@ -1200,7 +1244,7 @@ flowchart TD
 
   G --> H{Any rows\nin payload?}
   H -- no --> SKIP3[No PATCH sent\nthis tick]
-  H -- yes --> I[PATCH /api/multiplayer/item-state-update]
+  H -- yes --> I[PATCH /api/multiplayer/item-state]
 ```
 
 **`isSnapshotApplied` gate:** This is the most important client-side guard. Without it, the client would begin publishing item state before it has received the bootstrap snapshot — flooding the server with the local physics spawn-scatter positions rather than the authoritative settled positions from P1. This is particularly important for the env-authority client itself: it must not publish until it has confirmed what state the server already knows.
@@ -1243,9 +1287,10 @@ This pattern is **exactly one frame's latency**, deterministic, and requires non
 
 ```mermaid
 flowchart LR
-  A["SSE item-state-update<br/>row.pos, row.rot"] --> B{Body exists &<br/>ANIMATED?}
-  B -- no --> FALLBACK["applyPoseToMesh<br/>(mesh write, no body)"]
-  B -- yes --> WRITE["applyPoseToMesh<br/>mesh.position &amp; rotationQuaternion"]
+  A["SSE item-state-update<br/>row.pos, row.rot"] --> B{Body state}
+  B -- DYNAMIC --> SHORT["Short-circuit<br/>self is resolved owner<br/>(defense-in-depth)"]
+  B -- ANIMATED --> WRITE["applyPoseToMesh<br/>mesh.position &amp; rotationQuaternion"]
+  B -- "no body (mesh-only)" --> FALLBACK["applyPoseToMesh<br/>(mesh write, no body sync needed)"]
   WRITE --> PRE[Next Havok tick:<br/>pre-step copies mesh → body]
   PRE --> POST[Physics step:<br/>ANIMATED body is not integrated]
   POST --> RENDER[Render:<br/>mesh already at correct pose]
@@ -1328,7 +1373,7 @@ For future developers touching this code, the following lessons distilled from t
 
 **Problem 1 — the negative-scale decomposition trap.** `Matrix.decompose` is not a one-to-one inverse of `Matrix.Compose`. A scale of `(-s, s, -s)` is algebraically equivalent to a rotation of 180° about the world Y axis combined with a positive uniform scale:
 
-```
+```text
 diag(-s, s, -s)  ==  Rot_Y(π) · diag(s, s, s)
 ```
 

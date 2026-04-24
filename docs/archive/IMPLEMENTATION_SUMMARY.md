@@ -1,8 +1,11 @@
-# ✅ Serialization & Deserialization Complete
+# Serialization & Deserialization Complete
 
-**Status:** Production-Ready for Render Deployment  
-**Completion Date:** April 20, 2026  
-**Total Implementation:** 1,040 lines of code + 1,356 lines of documentation
+> [!NOTE]
+> **Historical document.** This is a dated sign-off snapshot from April 2026; line counts and file inventories have drifted. For the current serialization reference see [`SERIALIZATION_GUIDE.md`](../../SERIALIZATION_GUIDE.md) and [`SERIALIZATION_QUICK_REF.md`](../../SERIALIZATION_QUICK_REF.md); for the multiplayer wire contract see [`MULTIPLAYER_SYNCH.md`](../../MULTIPLAYER_SYNCH.md).
+
+**Status (historical):** Production-Ready for Render Deployment
+**Completion Date:** April 20, 2026
+**Total Implementation (at time of write):** 1,040 lines of code + 1,356 lines of documentation
 
 > **Item transform wire is pose-only (Invariant P) and Euler-free (Invariant E).** `ItemInstanceState` on the wire carries `pos: [number, number, number]` (world-space position) and `rot: [number, number, number, number]` (unit quaternion `[x,y,z,w]`) — no matrix, no Euler, no velocity, no scale. The Euler / quaternion helpers enumerated below are used by character sync; item sync uses `sampleMeshPose(mesh)` (owner) and `applyPoseToMesh(mesh, pose)` (non-owner) in `src/client/utils/multiplayer_serialization.ts`. See [MULTIPLAYER_SYNCH.md §5.2](MULTIPLAYER_SYNCH.md#52-item-state).
 

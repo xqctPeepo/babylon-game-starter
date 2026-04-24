@@ -1,5 +1,8 @@
 # Babylon Game Starter - Multiplayer Implementation Plan
 
+> [!NOTE]
+> **Historical plan.** This was the pre-implementation design doc; it contains `Next steps` lists and a few wrong paths (e.g. `multiplayer/character_sync.ts` — the actual location is [`src/client/sync/character_sync.ts`](../../src/client/sync/character_sync.ts)). The normative spec is now [`MULTIPLAYER_SYNCH.md`](../../MULTIPLAYER_SYNCH.md) and the onboarding guide is [`MULTIPLAYER.md`](../../MULTIPLAYER.md).
+
 ## Overview
 
 Transform babylon-game-starter into a multiplayer-capable game using **Datastar** for real-time state synchronization, using a **three-tier authority model**:

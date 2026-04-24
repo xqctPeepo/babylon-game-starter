@@ -12,7 +12,7 @@ This document walks through the complete Render deployment pipeline for babylon-
 
 ## Architecture Diagram
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Render Deployment (Single Container)             │
 └─────────────────────────────────────────────────────────────────────┘
@@ -168,7 +168,7 @@ MULTIPLAYER: {
 
 ### Client Connection Flow
 
-```
+```text
 Browser (Render Web Service)
          ↓
 (/index.html served by Nginx on port 10000)
@@ -269,37 +269,37 @@ Remote avatars are shown only when each client’s **`environmentName`** (from `
 
 ## File Structure
 
-```
+```text
 babylon-game-starter/
-├── Dockerfile                          # ✅ Client build + Go binary + nginx runtime
-├── docker-entrypoint.sh               # ✅ Starts Go :5000 + nginx :10000
-├── nginx.conf                          # ✅ Proxies /api/multiplayer to port 5000
+├── Dockerfile                          # Client build + Go binary + nginx runtime
+├── docker-entrypoint.sh                # Starts Go :5000 + nginx :10000
+├── nginx.conf                          # Proxies /api/multiplayer to port 5000
 ├── render.yaml                         # Render config
 ├── vite.config.ts                      # Dev server proxy setup
 ├── src/
 │   ├── client/
-│   │   ├── config/game_config.ts      # ✅ MULTIPLAYER config
-│   │   ├── datastar/                  # ✅ SSE client
+│   │   ├── config/game_config.ts       # MULTIPLAYER config
+│   │   ├── datastar/                   # SSE client
 │   │   ├── managers/multiplayer_manager.ts
-│   │   ├── sync/                      # ✅ State sync modules
-│   │   └── types/multiplayer.ts       # ✅ Interfaces
+│   │   ├── managers/multiplayer_bootstrap.ts  # Wires MP into the scene
+│   │   ├── sync/                       # State sync modules
+│   │   └── types/multiplayer.ts        # Interfaces
 │   ├── server/
-│   │   ├── api/                       # Node API (future)
-│   │   └── multiplayer/               # ✅ GO server
-│   │       ├── main.go                # Entry point
-│   │       ├── handlers.go            # HTTP handlers
-│   │       ├── utils.go               # Helpers
-│   │       └── go.mod                 # Go dependencies
+│   │   ├── api/                        # Node API (future)
+│   │   └── multiplayer/                # Go server
+│   │       ├── main.go                 # Entry point + shared state
+│   │       ├── handlers.go             # HTTP handlers
+│   │       ├── item_authority.go       # Item / env authority state
+│   │       ├── utils.go                # Helpers
+│   │       └── go.mod                  # Go dependencies
 │   └── deployment/
-│       ├── settings/settings.mjs      # ✅ Service registration
+│       ├── settings/settings.mjs       # Service registration
 │       └── scripts/
 │           ├── runtime-install-plan.mjs # Detects NEED_GO=1
 │           └── prepare-deployment.mjs
-└── docs/
-    ├── MULTIPLAYER_PLAN.md
-    ├── MULTIPLAYER_INTEGRATION.md
-    ├── MULTIPLAYER_QUICK_START.md
-    └── RENDER_DEPLOYMENT.md            # 📄 This file
+├── MULTIPLAYER.md                      # Onboarding + operations
+├── MULTIPLAYER_SYNCH.md                # Normative protocol spec
+└── RENDER_DEPLOYMENT.md                # This file
 ```
 
 ---
@@ -309,7 +309,8 @@ babylon-game-starter/
 ### Build Fails: "go: command not found"
 
 **Symptom**: Docker build fails in install phase
-```
+
+```text
 error: go: command not found
 ```
 
