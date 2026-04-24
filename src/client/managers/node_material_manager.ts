@@ -6,6 +6,9 @@ export class NodeMaterialManager {
   private static scene: BABYLON.Scene | null = null;
   private static activeNodeMaterials = new Map<string, BABYLON.NodeMaterial>();
 
+  /** Mesh name must include `#nmSnippetId` for NME substitution (most GLBs, e.g. Red crewmate, use standard materials only). */
+  private static readonly NM_SNIPPET_NAME_PATTERN = /#nm([A-Z0-9]+)/;
+
   private static hasInitializedAnimatedInputs(nodeMaterial: BABYLON.NodeMaterial): boolean {
     return Reflect.get(nodeMaterial, 'animatedInputs') !== null;
   }
@@ -26,8 +29,7 @@ export class NodeMaterialManager {
       return;
     }
 
-    // Check if mesh name contains #nm pattern
-    const nmMatch = /#nm([A-Z0-9]+)/.exec(mesh.name);
+    const nmMatch = NodeMaterialManager.NM_SNIPPET_NAME_PATTERN.exec(mesh.name);
     if (!nmMatch) {
       return; // No node material snippet ID found
     }
@@ -87,20 +89,30 @@ export class NodeMaterialManager {
   }
 
   /**
-   * Processes meshes from a model import result
+   * Processes meshes from a model import result (NME snippets in mesh names only).
+   * No-op when the asset has no `#nm…` markers — typical for glTF PBR like the Red character.
    */
   public static async processImportResult(result: {
     meshes: BABYLON.AbstractMesh[];
   }): Promise<void> {
-    if (!this.scene) {
+    if (!this.scene || !result.meshes?.length) {
       return;
     }
 
-    if (result.meshes) {
-      for (const mesh of result.meshes) {
-        if (mesh instanceof BABYLON.Mesh) {
-          await this.processMeshForNodeMaterial(mesh);
-        }
+    let anyNodeMaterialMesh = false;
+    for (const mesh of result.meshes) {
+      if (mesh instanceof BABYLON.Mesh && NodeMaterialManager.NM_SNIPPET_NAME_PATTERN.test(mesh.name)) {
+        anyNodeMaterialMesh = true;
+        break;
+      }
+    }
+    if (!anyNodeMaterialMesh) {
+      return;
+    }
+
+    for (const mesh of result.meshes) {
+      if (mesh instanceof BABYLON.Mesh) {
+        await this.processMeshForNodeMaterial(mesh);
       }
     }
   }

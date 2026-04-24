@@ -1,0 +1,6 @@
+{
+  "watch": ["src/server/multiplayer"],
+  "ext": "go,mod,sum",
+  "delay": "200ms",
+  "exec": "go run -C src/server/multiplayer ."
+}

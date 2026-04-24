@@ -2,6 +2,16 @@ node_modules
 dist
 *.tsbuildinfo
 
+# Local env overrides (e.g. VITE_MULTIPLAYER_HOST)
+.env.local
+.env.*.local
+
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Debug/test screenshots
+*.png

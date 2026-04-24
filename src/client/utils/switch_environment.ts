@@ -7,7 +7,14 @@
 import { SettingsUI } from '../ui/settings_ui';
 
 /**
- * Switches to the specified environment by name
+ * Switches to the specified environment by name.
+ *
+ * Multiplayer env-switch propagation (MULTIPLAYER_SYNCH.md §4.8) is handled inside
+ * {@link SettingsUI.changeEnvironment} — the single chokepoint every env-change path
+ * funnels through (portal triggers, the in-game settings dropdown, and the
+ * `environment_lock` fallback). Keeping the PATCH emission there guarantees any future
+ * caller that bypasses this utility still notifies the server.
+ *
  * @param environmentName - The name of the environment to switch to
  * @returns Promise that resolves when the environment switch is complete
  */

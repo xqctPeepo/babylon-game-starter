@@ -63,6 +63,23 @@ export interface PerformanceConfig {
   readonly WEBGPU_WHEN_AVAILABLE: boolean;
 }
 
+export interface MultiplayerConfig {
+  readonly ENABLED: boolean;
+  /** Default public host when not using `VITE_MULTIPLAYER_HOST` (host[:port], no scheme). */
+  readonly PRODUCTION_SERVER: string;
+  /** Default dev host when not using `VITE_MULTIPLAYER_HOST` (host[:port], no scheme). */
+  readonly LOCAL_SERVER: string;
+  readonly CONNECTION_TIMEOUT_MS: number;
+  /** When no `VITE_MULTIPLAYER_HOST`: try `PRODUCTION_SERVER` before `LOCAL_SERVER`. */
+  readonly PRODUCTION_FIRST: boolean;
+  /** Per-item authority proximity claim radius in world-space meters (MULTIPLAYER_SYNCH.md §4.7). */
+  readonly CLAIM_RADIUS_METERS: number;
+  /** Grace period (ms) after bubble exit before the owner releases authority. */
+  readonly CLAIM_GRACE_MS: number;
+  /** Server-side idle timeout (ms) after which another claim can override a stale owner. */
+  readonly CLAIM_IDLE_TIMEOUT_MS: number;
+}
+
 export interface GameConfig {
   readonly CHARACTER: CharacterConfig;
   readonly CAMERA: CameraConfig;
@@ -74,6 +91,7 @@ export interface GameConfig {
   readonly HUD: HUDConfig;
   readonly SETTINGS: SettingsConfig;
   readonly INVENTORY: InventoryConfig;
+  readonly MULTIPLAYER: MultiplayerConfig;
 }
 
 // Forward declarations for circular dependencies

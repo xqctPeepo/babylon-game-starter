@@ -1,5 +1,11 @@
 # Babylon Game Starter
 
+[![CI](https://github.com/EricEisaman/babylon-game-starter/actions/workflows/typecheck.yml/badge.svg)](https://github.com/EricEisaman/babylon-game-starter/actions/workflows/typecheck.yml)
+[![Babylon.js](https://img.shields.io/badge/Babylon.js-v9-BB464B?logo=babylon.js&logoColor=white)](https://www.babylonjs.com)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.3-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A518-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A modular, configuration-driven 3D game framework built with **Babylon.js v9**, **TypeScript**, and **Vite**.
 
 Babylon Game Starter provides a complete, ready-to-run foundation for building interactive 3D browser games. It ships with physics-based character movement, an environment system, collectibles, inventory, a behavior trigger system (proximity and fall-out-of-map), particle effects, an AudioV2-powered sound engine, and full mobile control support — all driven by configuration files. The same client can be bundled for the **Babylon.js Playground** via `playground.json`.
@@ -17,7 +23,7 @@ Babylon Game Starter provides a complete, ready-to-run foundation for building i
 - **Behavior system** — Proximity triggers, fall-out-of-world respawn, glow, `adjustCredits`, and environment `portal` actions
 - **HUD** — Device-adaptive layout (desktop / mobile / iPad + keyboard) from `game_config.ts`
 - **Mobile controls** — Virtual joystick, jump, and boost
-- **Playground export** — `npm run export:playground` produces `playground.json` for the web editor
+- **Playground export** — `npm run export:playground` produces `playground.json` for the Babylon.js web editor, **including multiplayer**. The export is smoke-checked by `scripts/check-playground-export.mjs` before it is written. See [*Running in the Babylon playground*](MULTIPLAYER.md#running-in-the-babylon-playground) for the classroom walkthrough, including the `?mp=host` runtime override.
 
 ---
 
@@ -44,6 +50,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) in your browser.
 
+**Multiplayer (local):** run `npm run dev:fullstack` to start Vite and the Go API together (Go restarts automatically when you save `src/server/multiplayer/**` — see `nodemon.multiplayer.json`). Or use two terminals: `npm run dev:multiplayer` then `npm run dev`. With `VITE_MULTIPLAYER_HOST` unset, the client uses same-origin `/api/multiplayer/*`, proxied to Go (see `vite.config.ts`). Override the backend with `.env.local` — see `.env.example`.
+
 ---
 
 ## Scripts
@@ -51,6 +59,9 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 | Command                     | Description                                                                 |
 | --------------------------- | ----------------------------------------------------------------------------- |
 | `npm run dev`               | Vite dev server (client root `src/client/`)                                 |
+| `npm run dev:multiplayer`   | Go multiplayer on `:5000`, **restarts on `.go` / `go.mod` / `go.sum` changes** (nodemon) |
+| `npm run dev:multiplayer:once` | One-shot `go run` (no file watcher)                                    |
+| `npm run dev:fullstack`     | Watched Go API + Vite (`-k` stops both if one exits)                         |
 | `npm run build`             | Production build to `dist/`                                                 |
 | `npm run preview`           | Preview the production build                                                  |
 | `npm run format`            | Prettier write on `src/**/*.ts`, `eslint.config.js`, `vite.config.ts`         |
@@ -58,7 +69,8 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 | `npm run lint`              | ESLint (runs in CI)                                                           |
 | `npm run lint:fix`          | ESLint with `--fix`                                                           |
 | `npm run typecheck`         | `tsc --noEmit` for app and Node configs (runs in CI)                        |
-| `npm run export:playground` | Generate `playground.json` for the Babylon.js editor                        |
+| `npm run export:playground` | Generate `playground.json` for the Babylon.js editor and smoke-check it     |
+| `npm run check:playground`  | Re-run the export smoke check standalone (walks every import from the entry)|
 | `npm run deploy:prepare`    | Validate deployment settings and scaffold host artifacts / `src/server/*`   |
 
 CI (`.github/workflows/typecheck.yml`) runs **`format:check` → `lint` → `typecheck`**.
@@ -67,7 +79,7 @@ CI (`.github/workflows/typecheck.yml`) runs **`format:check` → `lint` → `typ
 
 ## Project structure
 
-```
+```text
 src/client/
   config/              # assets.ts, game_config.ts, input_keys.ts, mobile_controls.ts,
                        # character_states.ts, local_dev.ts
@@ -98,7 +110,13 @@ eslint.config.js
 ## Documentation
 
 - **[USERS_GUIDE.md](USERS_GUIDE.md)** — Architecture, configuration, behaviors, fall respawn, condensed narrative notes
+- **[MULTIPLAYER.md](MULTIPLAYER.md)** — Multiplayer onboarding, configuration, testing, and troubleshooting
+- **[MULTIPLAYER_SYNCH.md](MULTIPLAYER_SYNCH.md)** — Normative wire contract, authority rules, and item-sync spec
+- **[PLAYGROUND.md](PLAYGROUND.md)** — Contributor guide for code that ships inside `playground.json` (ambient `BABYLON` global, static-imports-only rule, smoke-checker guardrails, export pipeline)
+- **[SERIALIZATION_GUIDE.md](SERIALIZATION_GUIDE.md)** — State serialization, deserialization, and mesh application
+- **[SERIALIZATION_QUICK_REF.md](SERIALIZATION_QUICK_REF.md)** — Cheat-sheet for the serialization helpers
 - **[src/deployment/DEPLOYMENT.md](src/deployment/DEPLOYMENT.md)** — Settings-driven deploy, Docker, host artifacts
+- **[RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)** — Production deploy on Render.com
 - **[STYLE.md](STYLE.md)** — TypeScript / ESLint / Prettier expectations for contributors
 
 ---
@@ -107,11 +125,37 @@ eslint.config.js
 
 ```mermaid
 flowchart TD
-  viteMain["main.ts"] --> playgroundClass["index.ts Playground"]
+  viteMain["main.ts"] --> playgroundClass["index.ts (Playground)"]
   playgroundClass --> sceneMgr["SceneManager"]
   playgroundClass --> settingsUI["SettingsUI"]
   playgroundClass --> charLoad["CharacterLoader"]
-  sceneMgr --> managers["Managers and controllers"]
+  playgroundClass --> mpBoot["multiplayer_bootstrap"]
+
+  subgraph Managers [Managers and controllers]
+    direction LR
+    audio["AudioManager"]
+    hud["HUDManager"]
+    coll["CollectiblesManager"]
+    inv["InventoryManager"]
+    vfx["VisualEffectsManager"]
+    sky["SkyManager"]
+    cam["CameraManager"]
+    charCtl["CharacterController"]
+  end
+
+  subgraph Sync [Multiplayer sync modules]
+    direction LR
+    mpMgr["MultiplayerManager"]
+    charSync["character_sync"]
+    itemSync["item_sync / configured_items_sync"]
+    auth["item_authority_tracker"]
+    env["environment_physics_sync"]
+  end
+
+  sceneMgr --> Managers
   settingsUI --> switchEnv["switchToEnvironment"]
   switchEnv --> sceneMgr
+  switchEnv --> mpBoot
+  mpBoot --> Sync
+  Sync --> Managers
 ```

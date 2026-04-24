@@ -17,17 +17,35 @@ const isStaticGithub =
 
 const base = isStaticGithub ? (deploymentSettings.static?.basePath ?? '/') : '/';
 
+// Longer prefixes must win: `/api` matches `/api/multiplayer/*` if registered first,
+// sending multiplayer traffic to the wrong backend (Node :8787 vs Go :5000).
+const proxiedServices = deploymentSettings.services
+  .filter((service: EndpointService) => typeof service.localPort === 'number')
+  .slice()
+  .sort((a, b) => b.routePrefix.length - a.routePrefix.length);
+
 const serviceProxy = Object.fromEntries(
-  deploymentSettings.services
-    .filter((service: EndpointService) => typeof service.localPort === 'number')
-    .map((service: EndpointService) => [
-      service.routePrefix,
-      {
-        target: `http://localhost:${service.localPort}`,
-        changeOrigin: true
-      }
-    ])
-);
+  proxiedServices.map((service: EndpointService) => [
+    service.routePrefix,
+    {
+      target: `http://127.0.0.1:${service.localPort}`,
+      changeOrigin: true
+    }
+  ])
+) as Record<
+  string,
+  { target: string; changeOrigin: boolean; timeout?: number; proxyTimeout?: number }
+>;
+
+// Long-lived SSE streams must not inherit http-proxy default timeouts (can drop ~10s in dev).
+const multiplayerPrefix = proxiedServices.find((s) => s.name === 'multiplayer')?.routePrefix;
+if (multiplayerPrefix && serviceProxy[multiplayerPrefix]) {
+  serviceProxy[multiplayerPrefix] = {
+    ...serviceProxy[multiplayerPrefix],
+    timeout: 0,
+    proxyTimeout: 0
+  };
+}
 
 export default defineConfig({
   root: clientRoot,

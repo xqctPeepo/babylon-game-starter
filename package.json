@@ -4,6 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:multiplayer": "nodemon -q --config nodemon.multiplayer.json",
+    "dev:multiplayer:once": "go run -C src/server/multiplayer .",
+    "dev:fullstack": "concurrently -k -n mp,web -c cyan,green \"npm run dev:multiplayer\" \"npm run dev\"",
     "build": "vite build",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
@@ -11,7 +14,8 @@
     "format:check": "prettier --check \"src/**/*.ts\" \"eslint.config.js\" \"vite.config.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "preview": "vite preview",
-    "export:playground": "node scripts/generate-playground-json.mjs",
+    "export:playground": "node scripts/generate-playground-json.mjs && node scripts/check-playground-export.mjs",
+    "check:playground": "node scripts/check-playground-export.mjs",
     "deploy:prepare": "node src/deployment/scripts/prepare-deployment.mjs"
   },
   "dependencies": {
@@ -28,6 +32,8 @@
     "babylonjs": "^9.1.0",
     "babylonjs-loaders": "^9.1.0",
     "babylonjs-materials": "^9.1.0",
+    "concurrently": "^9.1.2",
+    "nodemon": "^3.1.9",
     "eslint": "^9.39.4",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.32.0",

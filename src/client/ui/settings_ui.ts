@@ -7,6 +7,7 @@ import { CONFIG } from '../config/game_config';
 import { AudioManager } from '../managers/audio_manager';
 import { CutSceneManager } from '../managers/cut_scene_manager';
 import { HUDManager } from '../managers/hud_manager';
+import { getMultiplayerManager } from '../managers/multiplayer_manager';
 import { CharacterLock } from '../utils/character_lock';
 import { EnvironmentLock } from '../utils/environment_lock';
 
@@ -850,6 +851,34 @@ export class SettingsUI {
     const environmentLoaded = this.sceneManager.isEnvironmentLoaded();
     if (currentEnvironment === environmentName && environmentLoaded) {
       return;
+    }
+
+    // MULTIPLAYER_SYNCH.md §4.8 env-authority lifecycle: this is the single chokepoint for
+    // ALL env-change paths (portal via `switchToEnvironment`, the in-game settings
+    // dropdown in `game_config.ts`, and the `environment_lock` fallback). Propagate the
+    // change to the server BEFORE the cutscene / loadEnvironment kicks off so the PATCH
+    // resolves concurrently with the visual transition and `envAuthority[newEnv]` is set
+    // by the time the first sample tick fires for the new env. Without this, settings-
+    // dropdown-based switches never reached the server (confirmed by the RV Life bug:
+    // character-state updates reported `environmentName:"RV Life"` while the server still
+    // recorded `client.EnvironmentName == "Mansion"`, no [EnvSwitch] or [EnvAuthority]
+    // logs, no item-state-update broadcasts, presents/cake stuck ANIMATED in-air).
+    //
+    // Invariant P (pre-scene ownership) chokepoint: `mp.switchEnvironment` awaits the
+    // server PATCH response, applies `envAuthority[newEnv]` to `ItemAuthorityTracker`,
+    // and emits the synthetic `env-item-authority-changed` — all BEFORE `loadEnvironment`
+    // runs below. By the time `CollectiblesManager.setupEnvironmentItems` spawns items,
+    // the tracker lookup registered by `multiplayer_bootstrap.ts` can resolve ownership
+    // synchronously, so each massful item is born DYNAMIC (owner) or ANIMATED (peer)
+    // without an ANIMATED-then-promote flicker. Do not move the `await` below the
+    // `loadEnvironment` call or the invariant is lost.
+    try {
+      const mp = getMultiplayerManager();
+      if (mp.isMultiplayerActive()) {
+        await mp.switchEnvironment(environmentName);
+      }
+    } catch (error) {
+      console.warn('[SettingsUI] multiplayer env-switch propagation failed:', error);
     }
 
     this.closePanel();

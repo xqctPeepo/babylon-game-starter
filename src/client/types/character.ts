@@ -11,7 +11,8 @@ export type ItemEffect = Readonly<
 
 // Custom animation config: a named animation triggered by a specific key
 export interface CustomAnimationConfig {
-  readonly name: string; // Animation group name in the GLB
+  /** Babylon `AnimationGroup.name` in the character GLB (all groups tagged on import for cache-safe playback). */
+  readonly name: string;
   readonly key: string; // Keyboard key to trigger (e.g., "j", "d")
   readonly loop: boolean; // Whether the custom animation should loop when triggered
 }

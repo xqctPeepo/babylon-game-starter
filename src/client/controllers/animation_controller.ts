@@ -4,6 +4,7 @@
 
 // /// <reference path="../types/babylon.d.ts" />
 
+import { CHARACTER_ANIM_META_KEY } from '../config/character_animation_meta';
 import { CHARACTER_STATES } from '../config/character_states';
 
 import type { CharacterState } from '../config/character_states';
@@ -85,13 +86,18 @@ export class AnimationController {
     const targetGroup = this.findAnimationGroup(targetAnimationName);
     const targetResolvedName = targetGroup?.name ?? null;
 
-    // If the same Babylon clip is already active, skip (compare resolved names, not config keys)
+    // Same clip name as before — skip only if that group is actually playing (after character
+    // switch we may have stopped clips while `currentAnimation` was reset, or duplicate names).
     if (
       targetResolvedName !== null &&
       this.currentAnimation === targetResolvedName &&
       !this.isBlending
     ) {
-      return;
+      const grp = this.scene.getAnimationGroupByName(targetResolvedName);
+      if (grp?.isPlaying === true) {
+        return;
+      }
+      this.currentAnimation = null;
     }
 
     // If no animation is currently playing, start the target animation
@@ -116,7 +122,9 @@ export class AnimationController {
   }
 
   /**
-   * Triggers a specific animation by name, used for key-triggered custom animations.
+   * Triggers a specific animation by name (key-triggered custom configs on `Character.animations`).
+   * Uses the same tagged-group resolution as locomotion so cached multi-character scenes pick
+   * the correct GLB’s clip. Re-fires after a **non-looping** clip has finished (`!isPlaying`).
    */
   public playAnimation(animationName: string, loop: boolean): void {
     const targetAnimation = this.findAnimationGroup(animationName);
@@ -124,8 +132,10 @@ export class AnimationController {
       return;
     }
 
-    // No-op only if this animation is already the active one
-    if (this.currentAnimation === targetAnimation.name) {
+    if (
+      this.currentAnimation === targetAnimation.name &&
+      targetAnimation.isPlaying
+    ) {
       return;
     }
 
@@ -183,9 +193,74 @@ export class AnimationController {
     }
 
     if (animation) {
-      this.animationCache.set(animationName, animation);
+      const resolved =
+        this.resolveTaggedForCurrentCharacter(animationName, animation) ?? animation;
+      this.animationCache.set(animationName, resolved);
+      return resolved;
     }
     return animation;
+  }
+
+  /**
+   * Prefer clips tagged for the active playable character so cached swaps do not drive
+   * the wrong skeleton when multiple GLBs share names (`idle`, `walk`, or identical custom
+   * / emote names across characters). Custom clips from the same import are tagged too.
+   */
+  private resolveTaggedForCurrentCharacter(
+    animationName: string,
+    fallback: BABYLON.AnimationGroup | null
+  ): BABYLON.AnimationGroup | null {
+    const char = this.currentCharacter;
+    if (!char) {
+      return fallback;
+    }
+
+    const tagged = this.scene.animationGroups.filter((g) => {
+      const meta = (g.metadata ?? {}) as Record<string, unknown>;
+      return meta[CHARACTER_ANIM_META_KEY] === char.name;
+    });
+    if (tagged.length === 0) {
+      return fallback;
+    }
+
+    const resolveFrom = (pool: BABYLON.AnimationGroup[]): BABYLON.AnimationGroup | null => {
+      let anim = pool.find((a) => a.name === animationName) ?? null;
+      anim ??=
+        pool.find(
+          (a) =>
+            a.name.toLowerCase().includes(animationName.toLowerCase()) ||
+            animationName.toLowerCase().includes(a.name.toLowerCase())
+        ) ?? null;
+
+      if (!anim) {
+        if (animationName.toLowerCase().includes('idle')) {
+          anim =
+            pool.find(
+              (a) =>
+                a.name.toLowerCase().includes('idle') || a.name.toLowerCase().includes('stand')
+            ) ?? null;
+        } else if (animationName.toLowerCase().includes('walk')) {
+          anim =
+            pool.find(
+              (a) =>
+                a.name.toLowerCase().includes('walk') ||
+                a.name.toLowerCase().includes('run') ||
+                a.name.toLowerCase().includes('move')
+            ) ?? null;
+        } else if (animationName.toLowerCase().includes('jump')) {
+          anim =
+            pool.find(
+              (a) =>
+                a.name.toLowerCase().includes('jump') ||
+                a.name.toLowerCase().includes('leap') ||
+                a.name.toLowerCase().includes('hop')
+            ) ?? null;
+        }
+      }
+      return anim;
+    };
+
+    return resolveFrom(tagged) ?? fallback;
   }
 
   /**
@@ -219,34 +294,7 @@ export class AnimationController {
   private switchAnimationDirectly(targetAnimation: string): void {
     if (this.currentAnimation == null) return;
     const currentAnim = this.scene.getAnimationGroupByName(this.currentAnimation);
-    let targetAnim = this.scene.getAnimationGroupByName(targetAnimation);
-
-    // If target animation not found, try partial match
-    targetAnim ??=
-      this.scene.animationGroups.find(
-        (anim: BABYLON.AnimationGroup) =>
-          anim.name.toLowerCase().includes(targetAnimation.toLowerCase()) ||
-          targetAnimation.toLowerCase().includes(anim.name.toLowerCase())
-      ) ?? null;
-
-    // If still not found, try common fallbacks
-    if (!targetAnim) {
-      if (targetAnimation.toLowerCase().includes('idle')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('idle') || anim.name.toLowerCase().includes('stand')
-          ) ?? null;
-      } else if (targetAnimation.toLowerCase().includes('walk')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('walk') ||
-              anim.name.toLowerCase().includes('run') ||
-              anim.name.toLowerCase().includes('move')
-          ) ?? null;
-      }
-    }
+    const targetAnim = this.findAnimationGroup(targetAnimation);
 
     if (!currentAnim || !targetAnim) {
       return;
@@ -269,42 +317,7 @@ export class AnimationController {
   private startWeightedBlend(targetAnimation: string): void {
     if (this.currentAnimation == null) return;
     const currentAnim = this.scene.getAnimationGroupByName(this.currentAnimation);
-    let targetAnim = this.scene.getAnimationGroupByName(targetAnimation);
-
-    // If target animation not found, try partial match
-    targetAnim ??=
-      this.scene.animationGroups.find(
-        (anim: BABYLON.AnimationGroup) =>
-          anim.name.toLowerCase().includes(targetAnimation.toLowerCase()) ||
-          targetAnimation.toLowerCase().includes(anim.name.toLowerCase())
-      ) ?? null;
-
-    // If still not found, try common fallbacks
-    if (!targetAnim) {
-      if (targetAnimation.toLowerCase().includes('idle')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('idle') || anim.name.toLowerCase().includes('stand')
-          ) ?? null;
-      } else if (targetAnimation.toLowerCase().includes('walk')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('walk') ||
-              anim.name.toLowerCase().includes('run') ||
-              anim.name.toLowerCase().includes('move')
-          ) ?? null;
-      } else if (targetAnimation.toLowerCase().includes('jump')) {
-        targetAnim =
-          this.scene.animationGroups.find(
-            (anim: BABYLON.AnimationGroup) =>
-              anim.name.toLowerCase().includes('jump') ||
-              anim.name.toLowerCase().includes('leap') ||
-              anim.name.toLowerCase().includes('hop')
-          ) ?? null;
-      }
-    }
+    const targetAnim = this.findAnimationGroup(targetAnimation);
 
     if (!currentAnim || !targetAnim) {
       return;
@@ -452,5 +465,28 @@ export class AnimationController {
    */
   public isCurrentlyBlending(): boolean {
     return this.isBlending;
+  }
+
+  /**
+   * Normalized phase [0, 1] of the active AnimationGroup clip (BGS-MP-SYNC §5.1.1).
+   */
+  public getNormalizedPlaybackPhase(): number {
+    const name = this.currentAnimation;
+    if (!name) {
+      return 0;
+    }
+    const group = this.scene.getAnimationGroupByName(name);
+    if (!group?.isPlaying || group.animatables.length === 0) {
+      return 0;
+    }
+    const animatable = group.animatables[0];
+    if (!animatable) {
+      return 0;
+    }
+    const from = animatable.fromFrame;
+    const to = animatable.toFrame;
+    const span = Math.max(to - from, 1e-9);
+    const mf = animatable.masterFrame;
+    return Math.min(1, Math.max(0, (mf - from) / span));
   }
 }

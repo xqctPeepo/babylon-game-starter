@@ -6,7 +6,7 @@ services:
     region: oregon
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    healthCheckPath: /
+    healthCheckPath: /api/multiplayer/health
     autoDeploy: true
     envVars:
       - key: NODE_ENV

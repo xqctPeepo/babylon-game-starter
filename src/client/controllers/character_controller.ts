@@ -35,6 +35,10 @@ export class CharacterController {
   private boostActive = false;
   private superJumpActive = false;
   private invisibilityActive = false;
+  /** Wall-clock end of timed super-jump effect (ms); 0 when unused */
+  private superJumpEndsAtMs = 0;
+  /** Wall-clock end of timed invisibility effect (ms); 0 when unused */
+  private invisibilityEndsAtMs = 0;
   private playerParticleSystem: BABYLON.IParticleSystem | null = null;
   private thrusterSound: ManagedAudioSound | null = null;
   public animationController: AnimationController;
@@ -447,6 +451,8 @@ export class CharacterController {
     // Update mobile input every frame
     this.updateMobileInput();
 
+    this.expireTimedBoostEffects();
+
     // Retry boost sound start while boost is held, in case the file finished loading
     // after the initial key/touch event attempted playback.
     if (this.boostActive) {
@@ -833,6 +839,14 @@ export class CharacterController {
     return this.playerMesh;
   }
 
+  /**
+   * Horizontal facing used for movement / camera alignment (degrees of freedom on `displayCapsule`).
+   * Use for multiplayer rotation — independent of skeletal animation euler/quaternion drift on `playerMesh`.
+   */
+  public getFacingYawRadians(): number {
+    return this.displayCapsule.rotation.y;
+  }
+
   public getPhysicsCharacterController(): BABYLON.PhysicsCharacterController {
     return this.characterController;
   }
@@ -922,18 +936,7 @@ export class CharacterController {
 
     // Activate super jump effect
     this.superJumpActive = true;
-
-    // Reset after 5 seconds using scene observable
-    let frameCount = 0;
-    const maxFrames = 300; // 5 seconds at 60fps
-
-    const observer = this.scene.onBeforeRenderObservable.add(() => {
-      frameCount++;
-      if (frameCount >= maxFrames) {
-        this.superJumpActive = false;
-        this.scene.onBeforeRenderObservable.remove(observer);
-      }
-    });
+    this.superJumpEndsAtMs = Date.now() + 5000;
   }
 
   /**
@@ -944,18 +947,43 @@ export class CharacterController {
 
     // Activate invisibility effect
     this.invisibilityActive = true;
+    this.invisibilityEndsAtMs = Date.now() + 10000;
+  }
 
-    // Reset after 10 seconds using scene observable
-    let frameCount = 0;
-    const maxFrames = 600; // 10 seconds at 60fps
+  private expireTimedBoostEffects(): void {
+    const now = Date.now();
+    if (this.superJumpActive && this.superJumpEndsAtMs > 0 && now >= this.superJumpEndsAtMs) {
+      this.superJumpActive = false;
+      this.superJumpEndsAtMs = 0;
+    }
+    if (
+      this.invisibilityActive &&
+      this.invisibilityEndsAtMs > 0 &&
+      now >= this.invisibilityEndsAtMs
+    ) {
+      this.invisibilityActive = false;
+      this.invisibilityEndsAtMs = 0;
+    }
+  }
 
-    const observer = this.scene.onBeforeRenderObservable.add(() => {
-      frameCount++;
-      if (frameCount >= maxFrames) {
-        this.invisibilityActive = false;
-        this.scene.onBeforeRenderObservable.remove(observer);
-      }
-    });
+  /**
+   * Milliseconds remaining for timed boost effects (super jump / invisibility).
+   * Thruster hold has no countdown — returns 0 (BGS-MP-SYNC §5.1.1).
+   */
+  public getBoostTimeRemainingMs(): number {
+    const now = Date.now();
+    if (this.superJumpActive && this.superJumpEndsAtMs > 0) {
+      return Math.max(0, this.superJumpEndsAtMs - now);
+    }
+    if (this.invisibilityActive && this.invisibilityEndsAtMs > 0) {
+      return Math.max(0, this.invisibilityEndsAtMs - now);
+    }
+    return 0;
+  }
+
+  /** Opaque character model key for multiplayer (`characterModelId`, BGS-MP-SYNC §5.1.1). */
+  public getCharacterModelId(): string {
+    return this.currentCharacter?.name ?? '';
   }
 
   /**
@@ -1049,7 +1077,7 @@ export class CharacterController {
   public getCurrentState(): string {
     // Return current character state based on movement and physics
     const velocity = this.characterController.getVelocity();
-    const isMoving = velocity.length() > 0.1;
+    const isMoving = velocity.length() > 0.1 || this.isAnyMovementKeyPressed();
     const isJumping = velocity.y > 0.1;
     const isFalling = velocity.y < -0.1;
     const isRunning = isMoving && this.inputDirection.length() > 0.5;

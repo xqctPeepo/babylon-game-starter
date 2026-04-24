@@ -5,11 +5,19 @@ import path from 'node:path';
 const repoRoot = path.resolve(process.cwd());
 const srcRoot = path.join(repoRoot, 'src', 'client');
 
+// Every folder under src/client/ whose *.ts files must be bundled into the
+// playground snippet. Keep this in sync with the transitive imports of the
+// entry file below: if `managers/multiplayer_bootstrap.ts` imports
+// `../sync/item_sync`, then `sync` must be listed here or the pasted snippet
+// will fail to resolve the import inside https://playground.babylonjs.com.
+// `scripts/check-playground-export.mjs` catches missing folders after export.
 const exportRoots = [
   'config',
   'controllers',
+  'datastar',
   'input',
   'managers',
+  'sync',
   'types',
   'ui',
   'utils',

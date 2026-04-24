@@ -1,12 +1,23 @@
 // ============================================================================
 // BabylonJS PLAYGROUND V2 - MULTIFILE ENTRY POINT
 // ============================================================================
+//
+// This file is the entry used by both the Vite dev build (via `main.ts`) and
+// the exported `playground.json` snippet. When running inside
+// https://playground.babylonjs.com/ the student MUST enable the Havok WASM
+// plugin via the playground's top-right "Add WASM plugin" menu. Multiplayer
+// targets the default shared server (`CONFIG.MULTIPLAYER.PRODUCTION_SERVER`);
+// append `?mp=host[:port]` or `#mp=host[:port]` to the playground URL to
+// point at an instructor-hosted server instead. See MULTIPLAYER.md for the
+// full classroom walkthrough.
 
 // /// <reference path="./types/babylon.d.ts" />
 
 import { ASSETS } from './config/assets';
 import { CharacterLoader } from './managers/character_loader';
 import { HUDManager } from './managers/hud_manager';
+import { initMultiplayerAfterCharacterReady } from './managers/multiplayer_bootstrap';
+import { getMultiplayerManager } from './managers/multiplayer_manager';
 import { SceneManager } from './managers/scene_manager';
 import { InventoryUI } from './ui/inventory_ui';
 import { SettingsUI } from './ui/settings_ui';
@@ -27,6 +38,9 @@ class Playground {
   public static CreateScene(engine: BABYLON.Engine, canvas: HTMLCanvasElement): BABYLON.Scene {
     // Clean up any existing UI elements before creating new ones
     cleanupUI();
+    void getMultiplayerManager()
+      .leave()
+      .catch(() => undefined);
 
     const sceneManager = new SceneManager(engine, canvas);
 
@@ -68,6 +82,7 @@ class Playground {
       // Load character model after environment is loaded
       const spawnPoint = defaultEnv.spawnPoint ?? new BABYLON.Vector3(0, 1, 0);
       CharacterLoader.loadCharacterModel(undefined, undefined, spawnPoint);
+      void initMultiplayerAfterCharacterReady(sceneManager, defaultEnvironment);
     });
 
     return sceneManager.getScene();

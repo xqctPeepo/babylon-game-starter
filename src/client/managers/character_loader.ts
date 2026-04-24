@@ -5,6 +5,7 @@
 // /// <reference path="../types/babylon.d.ts" />
 
 import { ASSETS } from '../config/assets';
+import { CHARACTER_ANIM_META_KEY } from '../config/character_animation_meta';
 import { CONFIG } from '../config/game_config';
 import {
   stampScenePerfConsoleContext,
@@ -25,21 +26,20 @@ type CharacterEnvironmentReadyGate = Pick<
 >;
 
 export class CharacterLoader {
-  private static readonly CHARACTER_ANIM_META_KEY = 'babylon_game_starter_character_name';
-
   private static characterCache = new Map<string, BABYLON.AbstractMesh[]>();
   private static currentCharacterName: string | null = null;
   private static scene: BABYLON.Scene | null = null;
   private static characterController: CharacterController | null = null;
   private static environmentReadyGate: CharacterEnvironmentReadyGate | null = null;
 
+  /** Tags **all** groups from the character file (idle/walk/jump + any custom/emote clips). */
   private static tagCharacterAnimationGroups(
     characterName: string,
     groups: readonly BABYLON.AnimationGroup[]
   ): void {
     for (const group of groups) {
       const meta = (group.metadata ??= {}) as Record<string, unknown>;
-      meta[this.CHARACTER_ANIM_META_KEY] = characterName;
+      meta[CHARACTER_ANIM_META_KEY] = characterName;
     }
   }
 
@@ -60,7 +60,7 @@ export class CharacterLoader {
   ): void {
     for (const group of scene.animationGroups.slice()) {
       const meta = group.metadata as Record<string, unknown> | undefined;
-      if (meta?.[this.CHARACTER_ANIM_META_KEY] === characterName) {
+      if (meta?.[CHARACTER_ANIM_META_KEY] === characterName) {
         group.dispose();
       }
     }
@@ -96,8 +96,8 @@ export class CharacterLoader {
       return;
     }
 
-    // Check if character is already cached
-    if (this.currentCharacterName === character.name && this.characterCache.has(character.name)) {
+    // Check if character is already cached (including previously-active characters)
+    if (this.characterCache.has(character.name)) {
       this.activateCachedCharacter(character, preservedPosition);
       return;
     }
@@ -107,11 +107,8 @@ export class CharacterLoader {
       this.disableCurrentCharacter();
     }
 
-    // Only dispose animation clips owned by the outgoing playable character. Disposing
-    // every scene group breaks cached characters whose meshes are reused later.
-    if (this.currentCharacterName && this.currentCharacterName !== character.name) {
-      this.disposeAnimationGroupsForCharacter(this.scene, this.currentCharacterName);
-    }
+    // Do **not** dispose outgoing clips here: meshes stay in `characterCache` and must
+    // keep their AnimationGroups when the player switches back (dispose only in `pruneCache`).
 
     const revealEnvironmentAfterThisLoad = this.currentCharacterName === null;
 
@@ -274,8 +271,25 @@ export class CharacterLoader {
   /**
    * Disables the current character
    */
+  private static stopAnimationGroupsForCharacter(scene: BABYLON.Scene, characterName: string): void {
+    for (const group of scene.animationGroups.slice()) {
+      const meta = group.metadata as Record<string, unknown> | undefined;
+      if (meta?.[CHARACTER_ANIM_META_KEY] === characterName) {
+        try {
+          group.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
   private static disableCurrentCharacter(): void {
     if (!this.currentCharacterName) return;
+
+    if (this.scene) {
+      this.stopAnimationGroupsForCharacter(this.scene, this.currentCharacterName);
+    }
 
     const currentMeshes = this.characterCache.get(this.currentCharacterName);
     if (currentMeshes) {

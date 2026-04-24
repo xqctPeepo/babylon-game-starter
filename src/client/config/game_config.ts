@@ -300,5 +300,33 @@ export const CONFIG: GameConfig = {
     Z_INDEX: 1800,
     BUTTON_Z_INDEX: 2000,
     TILES: [] // Tiles will be added dynamically by InventoryManager
+  },
+
+  // Multiplayer: forks can point the client at their own Go server without editing this block
+  // by setting VITE_MULTIPLAYER_HOST in .env / .env.local (see repo .env.example).
+  // Students running the exported playground snippet can override at runtime via
+  // `?mp=host` or `#mp=host` on the playground URL (see MULTIPLAYER.md).
+  MULTIPLAYER: {
+    ENABLED: true,
+    PRODUCTION_SERVER: 'bgs-mp.onrender.com',
+    LOCAL_SERVER: 'localhost:5000',
+    // Render free-tier services sleep after ~15 min idle and take 10-30 s to
+    // wake. The first probe after a cold start can easily exceed 15 s on
+    // slow home connections. 30 s covers all observed cases so far, while
+    // `multiplayer-warming-up` fires on `window` at 5 s so the UI can explain
+    // the delay. See datastar_client.ts for the event contract.
+    CONNECTION_TIMEOUT_MS: 30000,
+    PRODUCTION_FIRST: true,
+    /**
+     * Per-item authority tunables (MULTIPLAYER_SYNCH.md §4.7).
+     * - CLAIM_RADIUS_METERS: radius around a dynamic item that triggers a proximity claim.
+     * - CLAIM_GRACE_MS: after leaving the bubble, keep ownership for this long so a quick
+     *   re-entry doesn't thrash claim/release.
+     * - CLAIM_IDLE_TIMEOUT_MS: if an owner stops publishing rows for this long, another
+     *   client's claim is accepted server-side.
+     */
+    CLAIM_RADIUS_METERS: 2.5,
+    CLAIM_GRACE_MS: 1200,
+    CLAIM_IDLE_TIMEOUT_MS: 1500
   }
 } as const;

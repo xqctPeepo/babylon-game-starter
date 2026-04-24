@@ -28,6 +28,43 @@ export class CollectiblesManager {
   private static physicsItems = new Map<string, BABYLON.AbstractMesh>();
   private static physicsItemBodies = new Map<string, BABYLON.PhysicsAggregate>();
 
+  /**
+   * Callback invoked after any item is collected locally. Set by the multiplayer
+   * bootstrap so the synchronizer can record an `ItemCollectionEvent` for the wire.
+   */
+  public static onItemCollected:
+    | ((instanceId: string, itemName: string, creditsEarned: number) => void)
+    | null = null;
+
+  /**
+   * Fires once all configured items (collectibles + non-collectible physics instances) for
+   * the environment have finished loading into the scene. The multiplayer bootstrap uses
+   * this to re-run `seedMotionTypesForEnv` + `rebuildProximityItems` with a populated items
+   * map, defending against the race where the render-loop's one-shot env-switch seed ran
+   * before async GLB instantiation completed (see scene_manager.ts comment on the
+   * deferred `environmentLoaded` flag).
+   */
+  public static onEnvironmentItemsReady: ((envName: string) => void) | null = null;
+
+  /**
+   * Pre-scene ownership lookup (Invariant P — MULTIPLAYER_SYNCH.md §4.8). Registered by
+   * `multiplayer_bootstrap.ts` immediately after `setSelfClientId`. Given an env-scoped
+   * instance id (`"<envName>::<localId>"`), returns:
+   *   - `true`  → self is resolved as this item's owner → spawn DYNAMIC from birth.
+   *   - `false` → a peer is resolved as owner → spawn ANIMATED (kinematic) from birth.
+   *   - `null`  → tracker cannot resolve yet (single-player, tracker not ready, unknown
+   *     env). Callers fall back to the ANIMATED-default-then-promote safety belt so the
+   *     seed / `env-item-authority-changed` handler can flip later.
+   * The manager stays tracker-agnostic by receiving the callback instead of importing
+   * the tracker directly.
+   */
+  public static resolveInitialOwnership: ((envScopedInstanceId: string) => boolean | null) | null =
+    null;
+
+  /** Mirrors `ENV_ITEM_SEPARATOR` in `configured_items_sync.ts` (intentional duplication
+   *  to keep the manager import-graph clean — the sync module already imports this manager). */
+  private static readonly ENV_ITEM_SEPARATOR = '::';
+
   // Cached particle systems for efficiency
   private static cachedParticleSystem: BABYLON.ParticleSystem | null = null;
   private static particleSystemPool: BABYLON.ParticleSystem[] = [];
@@ -63,6 +100,14 @@ export class CollectiblesManager {
 
     // Set up collectibles for this environment
     await this.setupCollectiblesForEnvironment(environment);
+
+    if (this.onEnvironmentItemsReady) {
+      try {
+        this.onEnvironmentItemsReady(environment.name);
+      } catch {
+        /* bootstrap hook best-effort; must not break gameplay */
+      }
+    }
   }
 
   /**
@@ -96,16 +141,48 @@ export class CollectiblesManager {
 
         if (itemConfig.collectible) {
           // Process as collectible item
-          this.createCollectibleInstance(instanceId, instance, itemConfig);
+          this.createCollectibleInstance(instanceId, instance, itemConfig, environment.name);
         } else {
           // Process as non-collectible physics item
-          this.createPhysicsInstance(instanceId, instance);
+          this.createPhysicsInstance(instanceId, instance, itemConfig, environment.name);
         }
       }
     }
 
     // Set up collision detection only for collectible items
     this.setupCollisionDetection();
+  }
+
+  /**
+   * Invariant P (pre-scene ownership) — resolves the initial motion type for a massful
+   * physics item from the tracker lookup registered by `multiplayer_bootstrap.ts`.
+   *
+   * Returns `DYNAMIC` only when the tracker has already resolved this instance as owned
+   * by self at spawn time (common case: owner's env-switch PATCH has returned and the
+   * synthetic `env-item-authority-changed` has been absorbed before `loadEnvironment`
+   * started). Otherwise returns `ANIMATED`, keeping the defense-in-depth belt intact so
+   * the render-loop seed + `env-item-authority-changed` handler can promote later.
+   *
+   * In single-player / MP-disabled builds the callback is unset and we short-circuit to
+   * `DYNAMIC` so massful items fall under gravity as expected.
+   */
+  private static resolveInitialMotionType(
+    envScopedId: string
+  ): BABYLON.PhysicsMotionType {
+    const cb = this.resolveInitialOwnership;
+    if (!cb) {
+      return BABYLON.PhysicsMotionType.DYNAMIC;
+    }
+    let owned: boolean | null = null;
+    try {
+      owned = cb(envScopedId);
+    } catch {
+      owned = null;
+    }
+    if (owned === true) {
+      return BABYLON.PhysicsMotionType.DYNAMIC;
+    }
+    return BABYLON.PhysicsMotionType.ANIMATED;
   }
 
   /**
@@ -180,7 +257,8 @@ export class CollectiblesManager {
   private static createCollectibleInstance(
     id: string,
     instance: ItemInstance,
-    itemConfig: ItemConfig
+    itemConfig: ItemConfig,
+    environmentName: string
   ): void {
     if (!this.scene || !this.instanceBasis) {
       return;
@@ -201,12 +279,16 @@ export class CollectiblesManager {
         meshInstance.setParent(null);
       }
 
-      // Apply instance properties
+      // Apply instance properties.
+      // Invariant E (multiplayer_serialization.ts §"Pose-only transport"): the Euler
+      // `mesh.rotation` channel MUST NEVER be written — `sampleMeshPose` reads only
+      // `rotationQuaternion`, so a raw Euler assignment would leave peers with a
+      // null quaternion and divergent rotations until a remote pose lands.
       meshInstance.position = instance.position;
       meshInstance.scaling.setAll(instance.scale);
       meshInstance.scaling._x *= -1;
       meshInstance.scaling._z *= -1;
-      meshInstance.rotation = instance.rotation;
+      meshInstance.rotationQuaternion = BABYLON.Quaternion.FromEulerVector(instance.rotation);
 
       // Make it visible and enabled
       meshInstance.isVisible = true;
@@ -224,6 +306,25 @@ export class CollectiblesManager {
       }
       const physicsAggregate = new BABYLON.PhysicsAggregate(meshInstance, shapeType, options);
 
+      // Invariant P (MULTIPLAYER_SYNCH.md §4.8 "pre-scene ownership"): owner spawns DYNAMIC
+      // from birth, non-owner spawns ANIMATED (kinematic) from birth, and the existing
+      // ANIMATED-default-then-promote belt (§6.2 rule 4) runs as defense-in-depth for any
+      // instance the tracker could not yet resolve at spawn time (e.g. single-player, or a
+      // late-loading item whose authority snapshot has not yet arrived).
+      if (instance.mass > 0 && physicsAggregate.body && !physicsAggregate.body.isDisposed) {
+        const envScopedId = `${environmentName}${this.ENV_ITEM_SEPARATOR}${id}`;
+        const motionType = this.resolveInitialMotionType(envScopedId);
+        try {
+          physicsAggregate.body.setMotionType(motionType);
+          if (motionType === BABYLON.PhysicsMotionType.ANIMATED) {
+            physicsAggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
+            physicsAggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
+          }
+        } catch {
+          /* body still initializing; seedMotionTypesForEnv will retry post-join. */
+        }
+      }
+
       // Store references
       this.collectibles.set(id, meshInstance);
       this.collectibleBodies.set(id, physicsAggregate);
@@ -231,8 +332,11 @@ export class CollectiblesManager {
       // Store the item config for this collectible
       this.itemConfigs.set(id, itemConfig);
 
-      // Add rotation animation
-      this.addRotationAnimation(meshInstance);
+      // Rotation animation is harmless on physics-bearing items (the body is the
+      // authoritative pose source and the animation is gated to mass === 0 anyway).
+      if (instance.mass === 0) {
+        this.addRotationAnimation(meshInstance);
+      }
 
       // Apply glow effect if specified
       if (
@@ -254,7 +358,12 @@ export class CollectiblesManager {
   /**
    * Creates a non-collectible physics instance from the loaded model
    */
-  private static createPhysicsInstance(id: string, instance: ItemInstance): void {
+  private static createPhysicsInstance(
+    id: string,
+    instance: ItemInstance,
+    itemConfig: ItemConfig,
+    environmentName: string
+  ): void {
     if (!this.scene || !this.instanceBasis) {
       return;
     }
@@ -271,10 +380,14 @@ export class CollectiblesManager {
         meshInstance.setParent(null);
       }
 
-      // Apply instance properties
+      // Apply instance properties.
+      // Invariant E (multiplayer_serialization.ts §"Pose-only transport"): the Euler
+      // `mesh.rotation` channel MUST NEVER be written — `sampleMeshPose` reads only
+      // `rotationQuaternion`, so a raw Euler assignment would leave peers with a
+      // null quaternion and divergent rotations until a remote pose lands.
       meshInstance.position = instance.position;
       meshInstance.scaling.setAll(instance.scale);
-      meshInstance.rotation = instance.rotation;
+      meshInstance.rotationQuaternion = BABYLON.Quaternion.FromEulerVector(instance.rotation);
 
       // Make it visible and enabled
       meshInstance.isVisible = true;
@@ -288,9 +401,27 @@ export class CollectiblesManager {
       }
       const physicsAggregate = new BABYLON.PhysicsAggregate(meshInstance, shapeType, options);
 
+      // Invariant P (pre-scene ownership) — see `createCollectibleInstance` for rationale.
+      // ANIMATED-default-then-promote belt (§6.2 rule 4) stays as defense-in-depth for
+      // unresolved items.
+      if (instance.mass > 0 && physicsAggregate.body && !physicsAggregate.body.isDisposed) {
+        const envScopedId = `${environmentName}${this.ENV_ITEM_SEPARATOR}${id}`;
+        const motionType = this.resolveInitialMotionType(envScopedId);
+        try {
+          physicsAggregate.body.setMotionType(motionType);
+          if (motionType === BABYLON.PhysicsMotionType.ANIMATED) {
+            physicsAggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
+            physicsAggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
+          }
+        } catch {
+          /* body still initializing; seedMotionTypesForEnv will retry post-join. */
+        }
+      }
+
       // Store references for cleanup
       this.physicsItems.set(id, meshInstance);
       this.physicsItemBodies.set(id, physicsAggregate);
+      this.itemConfigs.set(id, itemConfig);
 
       // Apply glow effect if specified
       if (
@@ -310,28 +441,54 @@ export class CollectiblesManager {
   }
 
   /**
-   * Adds a rotation animation to make collectibles more visible
+   * Adds a cosmetic yaw rotation to a massless collectible.
+   *
+   * Invariant E (MULTIPLAYER_SYNCH.md §5.2, no Euler on item transform paths): this animation
+   * MUST NOT touch `mesh.rotation`. Instead it composes a per-frame yaw delta onto
+   * `mesh.rotationQuaternion` inside `scene.onBeforeRenderObservable`, which is the channel
+   * the rest of the item pipeline (samplers, appliers, physics bodies) reads and writes.
+   *
+   * Callers gate this on `instance.mass === 0` — a physics body (kinematic or dynamic) is
+   * the authoritative pose source for any massful item, so spinning the mesh underneath it
+   * would desynchronize the render from the physics state and fight the matrix-only wire.
+   *
+   * TODO: expose a future `ItemConfig.rotateInPlace?: boolean` flag in
+   * `src/client/config/assets.ts` so per-instance cosmetic spin can be opted into explicitly
+   * rather than inferred from `mass === 0`.
    */
   private static addRotationAnimation(mesh: BABYLON.AbstractMesh): void {
     if (!this.scene) return;
 
-    const animation = new BABYLON.Animation(
-      'rotationAnimation',
-      'rotation.y',
-      30,
-      BABYLON.Animation.ANIMATIONTYPE_FLOAT,
-      BABYLON.Animation.ANIMATIONLOOPMODE_CYCLE
-    );
+    // Fold any authored Euler rotation (e.g. `instance.rotation` set during spawn) into
+    // the quaternion channel so switching to quaternion-only writes below preserves the
+    // original authored orientation. After this point the Euler channel is dead data
+    // for this mesh (Invariant E).
+    if (!mesh.rotationQuaternion) {
+      const e = mesh.rotation;
+      mesh.rotationQuaternion = BABYLON.Quaternion.RotationYawPitchRoll(e.y, e.x, e.z);
+    }
 
-    const keyFrames = [
-      { frame: 0, value: 0 },
-      { frame: 30, value: 2 * Math.PI }
-    ];
+    const radiansPerSecond = 2 * Math.PI;
+    const deltaQuat = new BABYLON.Quaternion();
+    const scene = this.scene;
 
-    animation.setKeys(keyFrames);
-    mesh.animations = [animation];
-
-    this.scene.beginAnimation(mesh, 0, 30, true);
+    const observer = scene.onBeforeRenderObservable.add(() => {
+      if (mesh.isDisposed()) {
+        if (observer) {
+          scene.onBeforeRenderObservable.remove(observer);
+        }
+        return;
+      }
+      const dtMs = scene.getEngine().getDeltaTime();
+      const dt = dtMs > 0 ? dtMs / 1000 : 1 / 60;
+      BABYLON.Quaternion.RotationAxisToRef(
+        BABYLON.Vector3.UpReadOnly,
+        radiansPerSecond * dt,
+        deltaQuat
+      );
+      const current = mesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
+      current.multiplyInPlace(deltaQuat);
+    });
   }
 
   /**
@@ -440,6 +597,282 @@ export class CollectiblesManager {
     // Add credits (default to 0 if not specified or if not collectible)
     const creditValue = itemConfig.collectible ? (itemConfig.creditValue ?? 0) : 0;
     this.totalCredits += creditValue;
+
+    // Notify the multiplayer bootstrap so the synchronizer can broadcast the collection event.
+    try {
+      this.onItemCollected?.(id, itemConfig.name, creditValue);
+    } catch {
+      /* callback must not break gameplay */
+    }
+  }
+
+  /** Collectible meshes + their (possibly-disposed) physics aggregates for sampling / apply. */
+  public static *getCollectibleEntries(): IterableIterator<
+    [
+      string,
+      {
+        mesh: BABYLON.AbstractMesh;
+        body: BABYLON.PhysicsAggregate | null;
+        config: ItemConfig;
+      }
+    ]
+  > {
+    for (const [id, mesh] of this.collectibles) {
+      const config = this.itemConfigs.get(id);
+      if (!config) {
+        continue;
+      }
+      yield [id, { mesh, body: this.collectibleBodies.get(id) ?? null, config }];
+    }
+  }
+
+  /** Non-collectible physics items (e.g. Cake) tracked by the manager. */
+  public static *getPhysicsItemEntries(): IterableIterator<
+    [
+      string,
+      {
+        mesh: BABYLON.AbstractMesh;
+        body: BABYLON.PhysicsAggregate | null;
+        config: ItemConfig;
+      }
+    ]
+  > {
+    for (const [id, mesh] of this.physicsItems) {
+      const config = this.itemConfigs.get(id);
+      if (!config) {
+        continue;
+      }
+      yield [id, { mesh, body: this.physicsItemBodies.get(id) ?? null, config }];
+    }
+  }
+
+  /** Whether the instance with `id` has been locally collected already. */
+  public static isCollectedInstance(id: string): boolean {
+    return this.collectedItems.has(id);
+  }
+
+  /**
+   * Resolves an instance id (from either the collectible or physics-item map) to its
+   * mesh + optional physics body. Returns null if the id is not tracked.
+   */
+  public static getMeshAndBody(
+    id: string
+  ): { mesh: BABYLON.AbstractMesh; body: BABYLON.PhysicsAggregate | null } | null {
+    const coll = this.collectibles.get(id);
+    if (coll) {
+      return { mesh: coll, body: this.collectibleBodies.get(id) ?? null };
+    }
+    const phys = this.physicsItems.get(id);
+    if (phys) {
+      return { mesh: phys, body: this.physicsItemBodies.get(id) ?? null };
+    }
+    return null;
+  }
+
+  /** Looks up the config for a tracked instance id; used by the sampler for the wire itemName. */
+  public static getItemConfigForInstance(id: string): ItemConfig | null {
+    return this.itemConfigs.get(id) ?? null;
+  }
+
+  /**
+   * Flips every tracked collectible + physics-item body between kinematic (`ANIMATED`) and
+   * dynamic (`DYNAMIC`) motion types.
+   *
+   * The multiplayer bootstrap calls this with `kinematic=true` on non-synchronizer clients so
+   * Havok stops integrating forces on replicated bodies — without this, dynamic bodies drift
+   * under gravity and collisions between the ~120ms authoritative snapshots and appear to
+   * "fly around". Synchronizer clients set `kinematic=false` so they can run the authoritative
+   * simulation locally.
+   */
+  public static setAllItemsKinematic(kinematic: boolean): void {
+    const motionType = kinematic
+      ? BABYLON.PhysicsMotionType.ANIMATED
+      : BABYLON.PhysicsMotionType.DYNAMIC;
+
+    const applyTo = (aggregate: BABYLON.PhysicsAggregate): void => {
+      const body = aggregate.body;
+      if (!body || body.isDisposed) {
+        return;
+      }
+      try {
+        if (body.getMotionType() !== motionType) {
+          body.setMotionType(motionType);
+        }
+        if (kinematic) {
+          body.setLinearVelocity(BABYLON.Vector3.Zero());
+          body.setAngularVelocity(BABYLON.Vector3.Zero());
+          // Havok sets disablePreStep=true when a body was ever DYNAMIC. For an
+          // ANIMATED (kinematic) replica we need mesh→body propagation on every
+          // pre-step (MULTIPLAYER_SYNCH.md §B.9), so force it back to false.
+          body.disablePreStep = false;
+        } else {
+          body.disablePreStep = true;
+        }
+      } catch {
+        /* Havok edge cases (e.g. body mid-initialization) — try again next frame */
+      }
+    };
+
+    for (const aggregate of this.collectibleBodies.values()) {
+      applyTo(aggregate);
+    }
+    for (const aggregate of this.physicsItemBodies.values()) {
+      applyTo(aggregate);
+    }
+  }
+
+  /**
+   * Flips the motion type of a single tracked item (collectible or physics item) between
+   * kinematic (ANIMATED) and dynamic (DYNAMIC). Used by the per-item authority pipeline so
+   * only items owned by the local client run a local dynamic simulation; peer-owned items
+   * remain kinematic and are teleported by incoming item-state rows.
+   */
+  public static setItemKinematic(localId: string, kinematic: boolean): boolean {
+    const aggregate =
+      this.collectibleBodies.get(localId) ?? this.physicsItemBodies.get(localId) ?? null;
+    if (!aggregate) {
+      return false;
+    }
+    const body = aggregate.body;
+    if (!body || body.isDisposed) {
+      return false;
+    }
+    const motionType = kinematic
+      ? BABYLON.PhysicsMotionType.ANIMATED
+      : BABYLON.PhysicsMotionType.DYNAMIC;
+    try {
+      if (body.getMotionType() !== motionType) {
+        body.setMotionType(motionType);
+      }
+      if (kinematic) {
+        body.setLinearVelocity(BABYLON.Vector3.Zero());
+        body.setAngularVelocity(BABYLON.Vector3.Zero());
+        // Havok's PhysicsAggregate constructor sets disablePreStep=true for
+        // DYNAMIC bodies so the initial simulation is not disturbed by mesh
+        // writes. When we flip to ANIMATED (peer replica), the non-owner apply
+        // path writes mesh.position / rotationQuaternion directly (see
+        // MULTIPLAYER_SYNCH.md §B.9) and relies on Havok's pre-step to copy
+        // mesh → body before each physics tick. Force disablePreStep=false
+        // here or the mesh writes are silently overridden by the body pose
+        // on the next post-step.
+        body.disablePreStep = false;
+      } else {
+        body.disablePreStep = true;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Idempotent, silent collection path for remote-driven state (non-synchronizer mirror).
+   * Mirrors the cleanup half of `collectItem` (dispose body, disable mesh, mark collected)
+   * but deliberately skips credits, inventory, effects, and sounds.
+   *
+   * Callers that need the feedback parity required by MULTIPLAYER_SYNCH.md §6.2 rule 1
+   * ("Remote-collect feedback parity") MUST use {@link applyRemoteCollectedWithFeedback}
+   * instead. This silent variant is reserved for reconciliation cases where the mesh is
+   * already gone at call time (e.g. the `isCollected:true` branch of an `updates[]` row
+   * that fires AFTER the canonical `collections[]` burst has already played).
+   */
+  public static applyRemoteCollected(id: string): void {
+    if (this.collectedItems.has(id)) {
+      return;
+    }
+    const mesh = this.collectibles.get(id) ?? this.physicsItems.get(id);
+    if (!mesh) {
+      return;
+    }
+
+    this.collectedItems.add(id);
+
+    const aggregate = this.collectibleBodies.get(id) ?? this.physicsItemBodies.get(id);
+    if (aggregate) {
+      try {
+        aggregate.dispose();
+      } catch {
+        /* ignore */
+      }
+      this.collectibleBodies.delete(id);
+      this.physicsItemBodies.delete(id);
+      if ('physicsBody' in mesh && (mesh as { physicsBody?: unknown }).physicsBody) {
+        (mesh as { physicsBody: BABYLON.PhysicsBody | null }).physicsBody = null;
+      }
+    }
+
+    try {
+      mesh.setEnabled(false);
+      mesh.isVisible = false;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Remote-driven collection WITH feedback parity (MULTIPLAYER_SYNCH.md §6.2 rule 1
+   * "Remote-collect feedback parity"). Captures the mesh's world position BEFORE
+   * cleanup, then plays the same particle burst and a distance-attenuated
+   * ("spatialized") collect sound that the local collector plays, then invokes the
+   * silent cleanup half.
+   *
+   * Does NOT touch credits, inventory, scoring, analytics, or the `onItemCollected`
+   * callback — those side-effects are the collector's exclusive responsibility.
+   *
+   * If the item has already been marked collected, or no local mesh exists (previous
+   * bootstrap snapshot dispatched it), this is a silent idempotent no-op — there is
+   * no anchor position for the VFX, and the event is purely reconciliation.
+   */
+  public static applyRemoteCollectedWithFeedback(id: string): void {
+    if (this.collectedItems.has(id)) {
+      return;
+    }
+    const mesh = this.collectibles.get(id) ?? this.physicsItems.get(id);
+    if (!mesh) {
+      return;
+    }
+
+    const worldPos = mesh.getAbsolutePosition().clone();
+
+    try {
+      this.showCollectionEffects(worldPos);
+    } catch {
+      /* feedback must not break reconciliation */
+    }
+    try {
+      this.playCollectSoundSpatialized(worldPos);
+    } catch {
+      /* feedback must not break reconciliation */
+    }
+
+    this.applyRemoteCollected(id);
+  }
+
+  /**
+   * Plays `collectionSound` at a volume attenuated by the distance between the
+   * scene's active camera (listener) and the supplied world position. This is the
+   * minimal "spatialized collection sound" required by §6.2 rule 1: the collect
+   * cue for a remote collection becomes quieter the farther the observer is from
+   * the collected item. Attenuation uses a 1 / (1 + d/r) falloff with r = 15 m,
+   * clamped to a minimum floor so distant collections stay audible.
+   */
+  private static playCollectSoundSpatialized(position: BABYLON.Vector3): void {
+    if (!this.collectionSound || !this.scene) {
+      return;
+    }
+    const baseVolume = 0.7;
+    let finalVolume = baseVolume;
+    const cam = this.scene.activeCamera;
+    if (cam) {
+      const listener = cam.globalPosition ?? cam.position;
+      if (listener) {
+        const dist = BABYLON.Vector3.Distance(listener, position);
+        const falloffRadius = 15;
+        const attenuation = 1 / (1 + dist / falloffRadius);
+        finalVolume = Math.max(0.05, Math.min(baseVolume, baseVolume * attenuation));
+      }
+    }
+    this.collectionSound.play({ volume: finalVolume });
   }
 
   /**

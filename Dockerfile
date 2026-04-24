@@ -28,16 +28,28 @@ RUN set -eux; \
 
 RUN npm run build
 
+# Static Go binary for multiplayer (listens on :5000; nginx proxies /api/multiplayer/ here).
+FROM golang:1.24-alpine AS go-builder
+WORKDIR /build
+COPY src/server/multiplayer/go.mod src/server/multiplayer/go.sum ./
+COPY src/server/multiplayer/*.go ./
+RUN CGO_ENABLED=0 go build -o /multiplayer-server .
+
 FROM nginx:alpine
 
 # Copy built assets
 COPY --from=builder /app/dist /usr/share/nginx/html
 
+COPY --from=go-builder /multiplayer-server /usr/local/bin/multiplayer-server
+
 # Copy nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Render web services commonly use 10000 on free plan.
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh /usr/local/bin/multiplayer-server
+
+# Render web services commonly use 10000 on free plan (nginx listens here; Go uses 5000).
 ENV PORT=10000
 EXPOSE 10000
 
-CMD ["nginx", "-g", "daemon off;"]
+ENTRYPOINT ["/docker-entrypoint.sh"]
