@@ -2,6 +2,7 @@
   "name": "babylon-game-starter-vite",
   "version": "1.0.0",
   "type": "module",
+  "license": "MIT",
   "scripts": {
     "dev": "vite",
     "dev:multiplayer": "nodemon -q --config nodemon.multiplayer.json",
