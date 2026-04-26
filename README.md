@@ -1,4 +1,12 @@
-# Babylon Game Starter
+<p align="center">
+  <img src="resources/Babylon_Game_Starter_Banner.jpg" alt="Babylon Game Starter — a futuristic isometric city with holographic UI panels" width="100%" />
+</p>
+
+<h1 align="center">Babylon Game Starter</h1>
+
+<p align="center"><em>A modular, configuration-driven 3D game framework built with Babylon.js v9, TypeScript, and Vite.</em></p>
+
+<p align="center">
 
 [![CI](https://github.com/EricEisaman/babylon-game-starter/actions/workflows/typecheck.yml/badge.svg)](https://github.com/EricEisaman/babylon-game-starter/actions/workflows/typecheck.yml)
 [![Babylon.js](https://img.shields.io/badge/Babylon.js-v9-BB464B?logo=babylon.js&logoColor=white)](https://www.babylonjs.com)
@@ -6,7 +14,7 @@
 [![Node](https://img.shields.io/badge/Node-%E2%89%A518-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A modular, configuration-driven 3D game framework built with **Babylon.js v9**, **TypeScript**, and **Vite**.
+</p>
 
 Babylon Game Starter provides a complete, ready-to-run foundation for building interactive 3D browser games. It ships with physics-based character movement, an environment system, collectibles, inventory, a behavior trigger system (proximity and fall-out-of-map), particle effects, an AudioV2-powered sound engine, and full mobile control support — all driven by configuration files. The same client can be bundled for the **Babylon.js Playground** via `playground.json`.
 
