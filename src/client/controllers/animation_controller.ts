@@ -132,10 +132,7 @@ export class AnimationController {
       return;
     }
 
-    if (
-      this.currentAnimation === targetAnimation.name &&
-      targetAnimation.isPlaying
-    ) {
+    if (this.currentAnimation === targetAnimation.name && targetAnimation.isPlaying) {
       return;
     }
 
@@ -193,8 +190,7 @@ export class AnimationController {
     }
 
     if (animation) {
-      const resolved =
-        this.resolveTaggedForCurrentCharacter(animationName, animation) ?? animation;
+      const resolved = this.resolveTaggedForCurrentCharacter(animationName, animation) ?? animation;
       this.animationCache.set(animationName, resolved);
       return resolved;
     }
@@ -236,8 +232,7 @@ export class AnimationController {
         if (animationName.toLowerCase().includes('idle')) {
           anim =
             pool.find(
-              (a) =>
-                a.name.toLowerCase().includes('idle') || a.name.toLowerCase().includes('stand')
+              (a) => a.name.toLowerCase().includes('idle') || a.name.toLowerCase().includes('stand')
             ) ?? null;
         } else if (animationName.toLowerCase().includes('walk')) {
           anim =

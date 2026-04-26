@@ -271,7 +271,10 @@ export class CharacterLoader {
   /**
    * Disables the current character
    */
-  private static stopAnimationGroupsForCharacter(scene: BABYLON.Scene, characterName: string): void {
+  private static stopAnimationGroupsForCharacter(
+    scene: BABYLON.Scene,
+    characterName: string
+  ): void {
     for (const group of scene.animationGroups.slice()) {
       const meta = group.metadata as Record<string, unknown> | undefined;
       if (meta?.[CHARACTER_ANIM_META_KEY] === characterName) {

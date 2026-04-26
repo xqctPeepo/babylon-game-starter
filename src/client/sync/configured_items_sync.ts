@@ -54,9 +54,7 @@ export function parseEnvScopedInstanceId(
  * velocity fields, and no matrix decomposition on the sample path. Env-scoped instance
  * ids let peers filter by their current environment.
  */
-export function sampleConfiguredItems(
-  environmentName: string
-): ItemInstanceState[] {
+export function sampleConfiguredItems(environmentName: string): ItemInstanceState[] {
   if (environmentName.trim() === '') {
     return [];
   }
@@ -66,7 +64,11 @@ export function sampleConfiguredItems(
 
   const push = (
     id: string,
-    entry: { mesh: BABYLON.AbstractMesh; body: BABYLON.PhysicsAggregate | null; config: { name: string } }
+    entry: {
+      mesh: BABYLON.AbstractMesh;
+      body: BABYLON.PhysicsAggregate | null;
+      config: { name: string };
+    }
   ): void => {
     const mesh = entry.mesh;
     if (!mesh || mesh.isDisposed()) {

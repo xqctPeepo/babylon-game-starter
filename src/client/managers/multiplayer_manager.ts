@@ -372,9 +372,7 @@ export class MultiplayerManager {
       });
 
       if (!res.ok) {
-        console.warn(
-          `[MultiplayerManager] env-switch failed: ${res.status} ${res.statusText}`
-        );
+        console.warn(`[MultiplayerManager] env-switch failed: ${res.status} ${res.statusText}`);
         return;
       }
 

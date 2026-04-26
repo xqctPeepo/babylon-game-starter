@@ -15,10 +15,7 @@
 // blanket non-synchronizer flip is a coarser approximation of the same invariant.
 
 import { ASSETS } from '../config/assets';
-import {
-  applyPoseToMesh,
-  sampleMeshPose
-} from '../utils/multiplayer_serialization';
+import { applyPoseToMesh, sampleMeshPose } from '../utils/multiplayer_serialization';
 
 import type { ItemInstanceState } from '../types/multiplayer';
 
@@ -118,8 +115,10 @@ export function applyRemoteEnvironmentPhysicsState(
   }
 
   if (
-    !Array.isArray(state.pos) || state.pos.length !== 3 ||
-    !Array.isArray(state.rot) || state.rot.length !== 4
+    !Array.isArray(state.pos) ||
+    state.pos.length !== 3 ||
+    !Array.isArray(state.rot) ||
+    state.rot.length !== 4
   ) {
     return;
   }
@@ -139,11 +138,7 @@ export function applyRemoteEnvironmentPhysicsState(
   };
   const body = node.physicsBody;
 
-  if (
-    body &&
-    !body.isDisposed &&
-    body.getMotionType() === BABYLON.PhysicsMotionType.DYNAMIC
-  ) {
+  if (body && !body.isDisposed && body.getMotionType() === BABYLON.PhysicsMotionType.DYNAMIC) {
     console.warn(
       `[EnvPhysicsSync] Received remote state for DYNAMIC (self-owned) env-physics item ${state.instanceId}; ignoring.`
     );

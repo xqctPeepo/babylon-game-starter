@@ -166,9 +166,7 @@ export class CollectiblesManager {
    * In single-player / MP-disabled builds the callback is unset and we short-circuit to
    * `DYNAMIC` so massful items fall under gravity as expected.
    */
-  private static resolveInitialMotionType(
-    envScopedId: string
-  ): BABYLON.PhysicsMotionType {
+  private static resolveInitialMotionType(envScopedId: string): BABYLON.PhysicsMotionType {
     const cb = this.resolveInitialOwnership;
     if (!cb) {
       return BABYLON.PhysicsMotionType.DYNAMIC;
@@ -486,7 +484,7 @@ export class CollectiblesManager {
         radiansPerSecond * dt,
         deltaQuat
       );
-      const current = mesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1);
+      const current = (mesh.rotationQuaternion ??= new BABYLON.Quaternion(0, 0, 0, 1));
       current.multiplyInPlace(deltaQuat);
     });
   }

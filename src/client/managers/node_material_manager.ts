@@ -101,7 +101,10 @@ export class NodeMaterialManager {
 
     let anyNodeMaterialMesh = false;
     for (const mesh of result.meshes) {
-      if (mesh instanceof BABYLON.Mesh && NodeMaterialManager.NM_SNIPPET_NAME_PATTERN.test(mesh.name)) {
+      if (
+        mesh instanceof BABYLON.Mesh &&
+        NodeMaterialManager.NM_SNIPPET_NAME_PATTERN.test(mesh.name)
+      ) {
         anyNodeMaterialMesh = true;
         break;
       }

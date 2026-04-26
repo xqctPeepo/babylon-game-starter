@@ -18,7 +18,6 @@
 import type { ItemAuthorityTracker } from './item_authority_tracker';
 import type { MultiplayerManager } from '../managers/multiplayer_manager';
 
-
 export interface ProximityItem {
   /** Wire instance id (env-scoped). */
   readonly instanceId: string;
@@ -120,7 +119,11 @@ export class ProximityClaimObserver {
         st.exitedAt = null;
         this.maybeClaim(id, charPos, now, st, self);
       } else if (isInside && st.inBubble) {
-        if (!this.tracker.isOwnedBySelf(id) && !st.claimInFlight && now - st.lastClaimAttemptAt > 400) {
+        if (
+          !this.tracker.isOwnedBySelf(id) &&
+          !st.claimInFlight &&
+          now - st.lastClaimAttemptAt > 400
+        ) {
           this.maybeClaim(id, charPos, now, st, self);
         }
       } else if (!isInside && st.inBubble) {

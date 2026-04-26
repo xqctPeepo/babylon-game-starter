@@ -134,9 +134,7 @@ export interface WirePose {
 export function sampleMeshPose(mesh: BABYLON.AbstractMesh): WirePose {
   const p = mesh.position;
   const q = mesh.rotationQuaternion;
-  const rot: QuaternionSerializable = q
-    ? normalizeQuaternion([q.x, q.y, q.z, q.w])
-    : [0, 0, 0, 1];
+  const rot: QuaternionSerializable = q ? normalizeQuaternion([q.x, q.y, q.z, q.w]) : [0, 0, 0, 1];
   return {
     pos: [clampPoseComponent(p.x), clampPoseComponent(p.y), clampPoseComponent(p.z)],
     rot

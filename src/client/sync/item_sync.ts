@@ -18,10 +18,7 @@
 // `configured_items_sync.ts`) decide whether the local client currently owns an instanceId
 // and may publish rows for it.
 
-import {
-  applyPoseToMesh,
-  ThrottledFunction
-} from '../utils/multiplayer_serialization';
+import { applyPoseToMesh, ThrottledFunction } from '../utils/multiplayer_serialization';
 
 import type { ItemInstanceState, ItemStateUpdate, ItemCollectionEvent } from '../types/multiplayer';
 
@@ -128,8 +125,10 @@ export class ItemSync {
 
     if (!state.isCollected) {
       const hasPose =
-        Array.isArray(state.pos) && state.pos.length === 3 &&
-        Array.isArray(state.rot) && state.rot.length === 4;
+        Array.isArray(state.pos) &&
+        state.pos.length === 3 &&
+        Array.isArray(state.rot) &&
+        state.rot.length === 4;
       if (!hasPose) {
         // Collection status still needs to be applied below.
       } else if (
@@ -169,9 +168,7 @@ export class ItemSync {
     }
   }
 
-  private static resolveMeshPhysicsBody(
-    mesh: BABYLON.AbstractMesh
-  ): BABYLON.PhysicsBody | null {
+  private static resolveMeshPhysicsBody(mesh: BABYLON.AbstractMesh): BABYLON.PhysicsBody | null {
     const maybe = (mesh as BABYLON.AbstractMesh & { physicsBody?: BABYLON.PhysicsBody })
       .physicsBody;
     if (maybe && !maybe.isDisposed) {

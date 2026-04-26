@@ -21,15 +21,12 @@ import {
 } from '../sync/environment_physics_sync';
 import { ItemAuthorityTracker } from '../sync/item_authority_tracker';
 import { ItemSync } from '../sync/item_sync';
+import { coerceCharacterState, coerceItemInstanceState } from '../sync/multiplayer_wire_guards';
+import { ProximityClaimObserver, type ProximityItem } from '../sync/proximity_claim_observer';
 import {
-  coerceCharacterState,
-  coerceItemInstanceState
-} from '../sync/multiplayer_wire_guards';
-import {
-  ProximityClaimObserver,
-  type ProximityItem
-} from '../sync/proximity_claim_observer';
-import { yawRadiansToWireQuaternion, toMultiplayerAnimationStateToken } from '../utils/multiplayer_serialization';
+  yawRadiansToWireQuaternion,
+  toMultiplayerAnimationStateToken
+} from '../utils/multiplayer_serialization';
 
 import { CollectiblesManager } from './collectibles_manager';
 import { getMultiplayerManager } from './multiplayer_manager';
@@ -38,8 +35,6 @@ import {
   refreshRemotePeerVisibilityForLocalEnvironment,
   removeRemotePeer
 } from './remote_peer_proxy';
-
-
 
 import type { SceneManager } from './scene_manager';
 import type { CharacterController } from '../controllers/character_controller';
@@ -400,10 +395,7 @@ export async function initMultiplayerAfterCharacterReady(
     // "peer is env-auth". The bootstrap calls seedMotionTypesForEnv explicitly
     // after `setSelfClientId` (Fix 3) to cover the snapshot-replay-arrived-first
     // race.
-    if (
-      authorityTracker.getSelfClientId() &&
-      envName === sceneManager.getCurrentEnvironment()
-    ) {
+    if (authorityTracker.getSelfClientId() && envName === sceneManager.getCurrentEnvironment()) {
       seedMotionTypesForEnv(envName);
       // Re-apply the last received item snapshot now that items have been set to their
       // correct motion types. This covers the race where the item-transform bootstrap
@@ -492,7 +484,10 @@ export async function initMultiplayerAfterCharacterReady(
   const envOnJoin = sceneManager.getCurrentEnvironment();
   if (envOnJoin) {
     authorityTracker.markSnapshotApplied(envOnJoin);
-    if (sceneManager.isEnvironmentLoaded() && authorityTracker.getEnvAuthority(envOnJoin) !== null) {
+    if (
+      sceneManager.isEnvironmentLoaded() &&
+      authorityTracker.getEnvAuthority(envOnJoin) !== null
+    ) {
       // Auth is already resolved (rare fast-path). Seed motion types and apply any
       // buffered snapshot now so items land in their correct kinematic/dynamic state
       // without waiting for the next event-loop task.
@@ -677,10 +672,7 @@ export async function initMultiplayerAfterCharacterReady(
     // the synchronizer from echoing kinematic transforms for items whose publisher
     // is the env-authority, which otherwise creates a self-feedback loop on
     // synchronizer-env-authority collisions.
-    if (
-      authorityTracker.isUnowned(st.instanceId) &&
-      mp.isSynchronizer()
-    ) {
+    if (authorityTracker.isUnowned(st.instanceId) && mp.isSynchronizer()) {
       const parsed = parseEnvScopedInstanceId(st.instanceId);
       const envForRow = parsed?.envName ?? sceneManager.getCurrentEnvironment();
       if (!envForRow || !authorityTracker.hasSnapshotAppliedFor(envForRow)) {
@@ -786,7 +778,10 @@ export async function initMultiplayerAfterCharacterReady(
         }
       }
       const worldUpdate = worldPhysicsItemSync.createStateUpdate(Date.now());
-      if (worldUpdate && ((worldUpdate.updates?.length ?? 0) > 0 || (worldUpdate.collections?.length ?? 0) > 0)) {
+      if (
+        worldUpdate &&
+        ((worldUpdate.updates?.length ?? 0) > 0 || (worldUpdate.collections?.length ?? 0) > 0)
+      ) {
         void mp.updateItemState(worldUpdate);
       }
 
@@ -801,9 +796,9 @@ export async function initMultiplayerAfterCharacterReady(
         const isSelf = selfId && envAuth === selfId;
         console.warn(
           `[SYNC_GATE] env="${envNow}" selfId="${selfId}" envAuth="${envAuth}" isEnvAuth=${isSelf} ` +
-          `snapshotApplied=${snapshotApplied} isSynchronizer=${mp.isSynchronizer()} ` +
-          `items=${itemStates.length} included=${includedCount} excluded=${excludedCount} ` +
-          `updateRows=${worldUpdate?.updates?.length ?? 0}`
+            `snapshotApplied=${snapshotApplied} isSynchronizer=${mp.isSynchronizer()} ` +
+            `items=${itemStates.length} included=${includedCount} excluded=${excludedCount} ` +
+            `updateRows=${worldUpdate?.updates?.length ?? 0}`
         );
       }
     }

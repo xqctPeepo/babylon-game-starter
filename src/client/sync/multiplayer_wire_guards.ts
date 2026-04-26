@@ -123,8 +123,7 @@ export function coerceCharacterState(raw: unknown): CharacterState | null {
     characterModelId = 'Red';
   }
 
-  const environmentName =
-    typeof o.environmentName === 'string' ? o.environmentName.trim() : '';
+  const environmentName = typeof o.environmentName === 'string' ? o.environmentName.trim() : '';
 
   const position = coerceWorldVector3(o.position);
   const rotation = coerceQuaternion(o.rotation);
@@ -139,8 +138,7 @@ export function coerceCharacterState(raw: unknown): CharacterState | null {
   }
 
   const afNum = Number(o.animationFrame);
-  const animationFrame =
-    Number.isFinite(afNum) ? Math.min(1, Math.max(0, afNum)) : 0;
+  const animationFrame = Number.isFinite(afNum) ? Math.min(1, Math.max(0, afNum)) : 0;
 
   const isJumping = Boolean(o.isJumping);
   const isBoosting = Boolean(o.isBoosting);
