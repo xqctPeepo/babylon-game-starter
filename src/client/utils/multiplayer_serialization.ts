@@ -23,6 +23,7 @@
 //    pre-step sync propagate to the body. `applyMatrixToBody` has been removed to
 //    prevent regressions.
 
+import type { CharacterController } from '../controllers/character_controller';
 import type {
   ColorSerializable,
   QuaternionSerializable,
@@ -441,4 +442,36 @@ export function toMultiplayerAnimationStateToken(gameplayStateLabel: string): st
     Falling: 'fall'
   };
   return locomotionMap[gameplayStateLabel] ?? gameplayStateLabel.toLowerCase();
+}
+
+/**
+ * Derives the wire-format animation token from the clip the local
+ * {@link AnimationController} is *actually* playing, not from raw `velocity.y`.
+ *
+ * Why: `CharacterController#getCurrentState()` returns `'Jumping'` for any
+ * `velocity.y > 0.1`, including terrain micro-bumps that the local
+ * `AnimationController.handleJumpDelay` deliberately suppresses (see
+ * `animation_controller.ts`). Using the raw label on the wire causes remote
+ * viewers to flicker into the jump pose for a tick on bumpy environments
+ * (e.g. RV Life) while the local avatar correctly stays in its run clip.
+ *
+ * Mapping:
+ *  - role `'jump'` -> `'jump'`
+ *  - role `'idle'` -> `'idle'`
+ *  - role `'walk'` -> `'run'` if {@link CharacterController.isRunningInput} else `'walk'`
+ *  - role `null` (init / custom-key clip) -> velocity-based fallback
+ *    via {@link toMultiplayerAnimationStateToken}, preserving prior behavior.
+ */
+export function deriveWireAnimToken(ctrl: CharacterController): string {
+  const role = ctrl.animationController.getCurrentRole();
+  if (role === 'jump') {
+    return 'jump';
+  }
+  if (role === 'idle') {
+    return 'idle';
+  }
+  if (role === 'walk') {
+    return ctrl.isRunningInput() ? 'run' : 'walk';
+  }
+  return toMultiplayerAnimationStateToken(ctrl.getCurrentState());
 }

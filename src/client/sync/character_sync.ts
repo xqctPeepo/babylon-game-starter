@@ -3,13 +3,13 @@
 // ============================================================================
 
 import {
+  deriveWireAnimToken,
   deserializeQuaternion,
   serializeVector3,
   ThrottledFunction,
   hasSignificantVector3Change,
   hasSignificantQuaternionChange,
   hasSignificantNumberChange,
-  toMultiplayerAnimationStateToken,
   yawRadiansToWireQuaternion
 } from '../utils/multiplayer_serialization';
 
@@ -73,9 +73,10 @@ export class CharacterSync {
       position: serializeVector3(mesh.position),
       rotation: yawRadiansToWireQuaternion(this.characterController.getFacingYawRadians()),
       velocity: serializeVector3(this.characterController.getVelocity()),
-      animationState: toMultiplayerAnimationStateToken(this.characterController.getCurrentState()),
+      /** Wire token mirrors the locally-played clip — see {@link deriveWireAnimToken} for rationale. */
+      animationState: deriveWireAnimToken(this.characterController),
       animationFrame: this.characterController.animationController.getNormalizedPlaybackPhase(),
-      isJumping: this.characterController.getVelocity().y > 0.1,
+      isJumping: this.characterController.animationController.getCurrentRole() === 'jump',
       isBoosting:
         this.characterController.isBoosting() ||
         this.characterController.getBoostStatus() !== 'Ready',

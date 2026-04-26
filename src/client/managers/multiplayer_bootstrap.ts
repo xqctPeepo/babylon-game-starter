@@ -24,8 +24,8 @@ import { ItemSync } from '../sync/item_sync';
 import { coerceCharacterState, coerceItemInstanceState } from '../sync/multiplayer_wire_guards';
 import { ProximityClaimObserver, type ProximityItem } from '../sync/proximity_claim_observer';
 import {
-  yawRadiansToWireQuaternion,
-  toMultiplayerAnimationStateToken
+  deriveWireAnimToken,
+  yawRadiansToWireQuaternion
 } from '../utils/multiplayer_serialization';
 
 import { CollectiblesManager } from './collectibles_manager';
@@ -84,7 +84,6 @@ function sampleLocalState(
   if (!characterModelId) {
     return null;
   }
-  const vel = ctrl.getVelocity();
   return {
     clientId,
     environmentName: environmentName.trim(),
@@ -92,9 +91,10 @@ function sampleLocalState(
     position: vec3FromMesh(mesh),
     rotation: yawRadiansToWireQuaternion(ctrl.getFacingYawRadians()),
     velocity: vel3(ctrl),
-    animationState: toMultiplayerAnimationStateToken(ctrl.getCurrentState()),
+    /** Wire token mirrors the locally-played clip — see {@link deriveWireAnimToken} for rationale. */
+    animationState: deriveWireAnimToken(ctrl),
     animationFrame: ctrl.animationController.getNormalizedPlaybackPhase(),
-    isJumping: vel.y > 0.12,
+    isJumping: ctrl.animationController.getCurrentRole() === 'jump',
     isBoosting: ctrl.isBoosting() || ctrl.getBoostStatus() !== 'Ready',
     boostType: deriveBoostType(ctrl),
     boostTimeRemaining: ctrl.getBoostTimeRemainingMs(),

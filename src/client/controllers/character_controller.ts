@@ -1093,6 +1093,17 @@ export class CharacterController {
     }
   }
 
+  /**
+   * True when the player is actively driving forward/strafe input above the run threshold.
+   *
+   * Used by the multiplayer wire-format builder to distinguish `walk` from `run` while the
+   * local {@link AnimationController} is in the `'walk'` role (it plays a single locomotion
+   * clip; the remote-side just needs the magnitude to pick the matching playback rate).
+   */
+  public isRunningInput(): boolean {
+    return this.inputDirection.length() > 0.5;
+  }
+
   public getBoostStatus(): string {
     if (this.superJumpActive) {
       return 'Super Jump Active';
