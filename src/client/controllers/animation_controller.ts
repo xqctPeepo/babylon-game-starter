@@ -10,10 +10,19 @@ import { CHARACTER_STATES } from '../config/character_states';
 import type { CharacterState } from '../config/character_states';
 import type { Character } from '../types/character';
 
+/**
+ * Semantic role of the currently-playing locomotion clip.
+ *
+ * `null` while no role-driven clip has been started (init, post-character-switch,
+ * or a custom-key clip is active via {@link AnimationController.playAnimation}).
+ */
+export type AnimationRole = 'idle' | 'walk' | 'jump' | null;
+
 export class AnimationController {
   private scene: BABYLON.Scene;
   private currentCharacter: Character | null = null;
   private currentAnimation: string | null = null;
+  private currentRole: AnimationRole = null;
   private previousAnimation: string | null = null;
   private blendStartTime = 0;
   private blendDuration = 400; // Default blend duration in milliseconds
@@ -38,6 +47,7 @@ export class AnimationController {
 
     // Reset animation state when character changes
     this.currentAnimation = null;
+    this.currentRole = null;
     this.previousAnimation = null;
     this.isBlending = false;
 
@@ -63,15 +73,20 @@ export class AnimationController {
     this.handleJumpDelay(characterState);
 
     let targetAnimationName: string;
+    let targetRole: AnimationRole;
 
-    // Determine animation based on character state first, then movement
+    /** Single source of truth for the wire-format anim token (see {@link deriveWireAnimToken}). */
     if (characterState === CHARACTER_STATES.IN_AIR && !this.isJumpDelayed) {
       targetAnimationName = this.currentCharacter.animations.jump;
+      targetRole = 'jump';
     } else if (isMoving) {
       targetAnimationName = this.currentCharacter.animations.walk;
+      targetRole = 'walk';
     } else {
       targetAnimationName = this.currentCharacter.animations.idle;
+      targetRole = 'idle';
     }
+    this.currentRole = targetRole;
 
     // If the current clip was disposed (e.g. after a character switch), clear stale state
     if (
@@ -136,6 +151,8 @@ export class AnimationController {
       return;
     }
 
+    /** Custom-key clip is not part of the locomotion role set; clear so the wire path falls back. */
+    this.currentRole = null;
     this.startAnimation(targetAnimation.name, loop);
   }
 
@@ -259,6 +276,24 @@ export class AnimationController {
   }
 
   /**
+   * Animation groups owned by the LOCAL character.
+   *
+   * Filters `scene.animationGroups` by {@link CHARACTER_ANIM_META_KEY} === current character name.
+   * Remote peer GLB clips imported in {@link remote_peer_proxy} are NOT tagged, so they are correctly
+   * excluded — local controller must never stop/start groups it does not own.
+   */
+  private getOwnedAnimationGroups(): BABYLON.AnimationGroup[] {
+    const char = this.currentCharacter;
+    if (!char) {
+      return [];
+    }
+    return this.scene.animationGroups.filter((g) => {
+      const meta = (g.metadata ?? {}) as Record<string, unknown>;
+      return meta[CHARACTER_ANIM_META_KEY] === char.name;
+    });
+  }
+
+  /**
    * Starts a new animation directly (no blending)
    */
   private startAnimation(animationName: string, loop = true): void {
@@ -268,17 +303,16 @@ export class AnimationController {
       return;
     }
 
-    // Stop all other animation groups in the scene
-    this.scene.animationGroups.forEach((anim: BABYLON.AnimationGroup) => {
+    /** Scope stops to LOCAL-owned groups only — never touch remote peer clips. */
+    for (const anim of this.getOwnedAnimationGroups()) {
       if (anim !== animation) {
         anim.stop();
       }
-    });
+    }
 
-    // Start the new animation
     animation.weight = 1.0;
     animation.start(loop);
-    this.currentAnimation = animation.name; // Use the actual animation name
+    this.currentAnimation = animation.name;
     this.previousAnimation = null;
     this.isBlending = false;
   }
@@ -398,12 +432,14 @@ export class AnimationController {
   }
 
   /**
-   * Stops all animations
+   * Stops all LOCAL-owned animations.
+   *
+   * Scoped to {@link getOwnedAnimationGroups} so remote peer clips are not silenced.
    */
   public stopAllAnimations(): void {
-    this.scene.animationGroups.forEach((anim: BABYLON.AnimationGroup) => {
+    for (const anim of this.getOwnedAnimationGroups()) {
       anim.stop();
-    });
+    }
 
     this.currentAnimation = null;
     this.previousAnimation = null;
@@ -453,6 +489,19 @@ export class AnimationController {
    */
   public getCurrentAnimation(): string | null {
     return this.currentAnimation;
+  }
+
+  /**
+   * Semantic role of the currently-playing locomotion clip.
+   *
+   * Reflects what the local avatar is actually rendering — used by the multiplayer
+   * wire-format builders so remote viewers never see a state the local user does
+   * not (e.g. jump pop-ins from terrain micro-bumps that {@link handleJumpDelay}
+   * intentionally suppresses). Returns `null` until the first locomotion update
+   * runs after a character switch, or while a custom-key clip is active.
+   */
+  public getCurrentRole(): AnimationRole {
+    return this.currentRole;
   }
 
   /**

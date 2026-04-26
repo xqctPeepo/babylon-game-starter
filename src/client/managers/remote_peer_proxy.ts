@@ -95,7 +95,8 @@ function applyPeerVisualLayer(entry: PeerEntry): void {
         ps.stop();
       }
     } catch {
-      /* ignore */
+      /** Disposed PS handle — drop it so the lazy re-create path can rebuild on next apply. */
+      entry.particleSystem = null;
     }
   }
 
@@ -107,7 +108,8 @@ function applyPeerVisualLayer(entry: PeerEntry): void {
 
 async function createThrusterParticles(
   scene: BABYLON.Scene,
-  emitter: BABYLON.AbstractMesh
+  emitter: BABYLON.AbstractMesh,
+  clientId: string
 ): Promise<BABYLON.IParticleSystem | null> {
   const snippet = CONFIG.EFFECTS.PARTICLE_SNIPPETS.find(
     (s) => s.name === CONFIG.EFFECTS.DEFAULT_PARTICLE
@@ -117,6 +119,8 @@ async function createThrusterParticles(
   }
   try {
     const ps = await BABYLON.ParticleHelper.ParseFromSnippetAsync(snippet.snippetId, scene);
+    /** Name MUST contain `boost`/`thruster` so {@link SceneManager.clearParticles} preserves it across env switches. */
+    ps.name = `mp-remote-boost-thruster-${clientId}`;
     ps.emitter = emitter;
     ps.stop();
     return ps;
@@ -179,7 +183,7 @@ async function importRemoteCharacter(
     result.animationGroups.find((a) => a.name === idleName) ??
     result.animationGroups.find((a) => a.name.toLowerCase().includes('idle'));
 
-  const ps = await createThrusterParticles(scene, rootMesh);
+  const ps = await createThrusterParticles(scene, rootMesh, clientId);
   if (token !== entry.loadSeq) {
     ps?.dispose();
     return;
@@ -258,19 +262,65 @@ function ensurePeerRoot(scene: BABYLON.Scene, clientId: string): PeerEntry {
   return entry;
 }
 
+/**
+ * Lazily re-create the remote thruster PS when it is missing, environments match, and a visual root exists.
+ *
+ * Guarded by `entry.loadSeq` so a model reload landing mid-flight cannot be overwritten with a stale PS.
+ * Safe to call on every apply tick: returns immediately when the PS is already present or the seq has advanced.
+ */
+function ensureThrusterParticles(scene: BABYLON.Scene, entry: PeerEntry, clientId: string): void {
+  if (entry.particleSystem) {
+    return;
+  }
+  const root = entry.visualRootMesh;
+  if (!root) {
+    return;
+  }
+  if (!sameEnvironment(entry.remoteEnvironmentName, entry.lastLocalEnvironmentName)) {
+    return;
+  }
+  const tokenAtRequest = entry.loadSeq;
+  void (async () => {
+    const ps = await createThrusterParticles(scene, root, clientId);
+    if (!ps) {
+      return;
+    }
+    if (tokenAtRequest !== entry.loadSeq || entry.particleSystem) {
+      ps.dispose();
+      return;
+    }
+    entry.particleSystem = ps;
+    if (
+      sameEnvironment(entry.remoteEnvironmentName, entry.lastLocalEnvironmentName) &&
+      entry.desiredBoost
+    ) {
+      try {
+        ps.start();
+      } catch {
+        entry.particleSystem = null;
+      }
+    }
+  })();
+}
+
 function syncBoostVisual(entry: PeerEntry): void {
   const ps = entry.particleSystem;
   if (!ps) {
     return;
   }
-  if (!sameEnvironment(entry.remoteEnvironmentName, entry.lastLocalEnvironmentName)) {
-    ps.stop();
-    return;
-  }
-  if (entry.desiredBoost) {
-    ps.start();
-  } else {
-    ps.stop();
+  try {
+    if (!sameEnvironment(entry.remoteEnvironmentName, entry.lastLocalEnvironmentName)) {
+      ps.stop();
+      return;
+    }
+    if (entry.desiredBoost) {
+      ps.start();
+    } else {
+      ps.stop();
+    }
+  } catch {
+    /** Disposed PS handle — drop it so the lazy re-create path can rebuild on next apply. */
+    entry.particleSystem = null;
   }
 }
 
@@ -309,9 +359,6 @@ function syncRemoteLocomotion(entry: PeerEntry, state: CharacterState): void {
   }
 
   const tokenNorm = normalizeAnimToken(state.animationState ?? 'idle');
-  if (entry.lastAnimationToken === tokenNorm) {
-    return;
-  }
 
   const character = ASSETS.CHARACTERS.find((c) => c.name === state.characterModelId);
   if (!character) {
@@ -323,6 +370,14 @@ function syncRemoteLocomotion(entry: PeerEntry, state: CharacterState): void {
     groups.find((g) => g.name === clipName) ??
     groups.find((g) => g.name.toLowerCase() === clipName.toLowerCase()) ??
     groups.find((g) => g.name.toLowerCase().includes(tokenNorm));
+
+  /**
+   * Only skip when the same token is already correctly playing on the target group.
+   * Guards the env-switch race where groups were stopped while the token did not change.
+   */
+  if (entry.lastAnimationToken === tokenNorm && target?.isPlaying) {
+    return;
+  }
 
   stopAllRemoteGroups(groups);
   entry.lastAnimationToken = tokenNorm;
@@ -364,12 +419,13 @@ export function refreshRemotePeerVisibilityForLocalEnvironment(
   }
 
   const local = localEnvironmentName.trim();
-  for (const entry of peers.values()) {
+  for (const [clientId, entry] of peers) {
     entry.lastLocalEnvironmentName = local;
     applyPeerVisualLayer(entry);
     if (!sameEnvironment(entry.remoteEnvironmentName, entry.lastLocalEnvironmentName)) {
       continue;
     }
+    ensureThrusterParticles(scene, entry, clientId);
     if (entry.lastState) {
       syncBoostVisual(entry);
       syncRemoteLocomotion(entry, entry.lastState);
@@ -432,6 +488,7 @@ export function applyRemotePeerState(
     return;
   }
 
+  ensureThrusterParticles(scene, entry, state.clientId);
   syncBoostVisual(entry);
   syncRemoteLocomotion(entry, state);
 }
