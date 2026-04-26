@@ -126,6 +126,7 @@ eslint.config.js
 - **[src/deployment/DEPLOYMENT.md](src/deployment/DEPLOYMENT.md)** — Settings-driven deploy, Docker, host artifacts
 - **[RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)** — Production deploy on Render.com
 - **[STYLE.md](STYLE.md)** — TypeScript / ESLint / Prettier expectations for contributors
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — Dev setup, PR workflow, commit conventions, and SemVer policy
 
 ---
 
