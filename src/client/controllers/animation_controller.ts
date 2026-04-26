@@ -259,6 +259,24 @@ export class AnimationController {
   }
 
   /**
+   * Animation groups owned by the LOCAL character.
+   *
+   * Filters `scene.animationGroups` by {@link CHARACTER_ANIM_META_KEY} === current character name.
+   * Remote peer GLB clips imported in {@link remote_peer_proxy} are NOT tagged, so they are correctly
+   * excluded — local controller must never stop/start groups it does not own.
+   */
+  private getOwnedAnimationGroups(): BABYLON.AnimationGroup[] {
+    const char = this.currentCharacter;
+    if (!char) {
+      return [];
+    }
+    return this.scene.animationGroups.filter((g) => {
+      const meta = (g.metadata ?? {}) as Record<string, unknown>;
+      return meta[CHARACTER_ANIM_META_KEY] === char.name;
+    });
+  }
+
+  /**
    * Starts a new animation directly (no blending)
    */
   private startAnimation(animationName: string, loop = true): void {
@@ -268,17 +286,16 @@ export class AnimationController {
       return;
     }
 
-    // Stop all other animation groups in the scene
-    this.scene.animationGroups.forEach((anim: BABYLON.AnimationGroup) => {
+    /** Scope stops to LOCAL-owned groups only — never touch remote peer clips. */
+    for (const anim of this.getOwnedAnimationGroups()) {
       if (anim !== animation) {
         anim.stop();
       }
-    });
+    }
 
-    // Start the new animation
     animation.weight = 1.0;
     animation.start(loop);
-    this.currentAnimation = animation.name; // Use the actual animation name
+    this.currentAnimation = animation.name;
     this.previousAnimation = null;
     this.isBlending = false;
   }
@@ -398,12 +415,14 @@ export class AnimationController {
   }
 
   /**
-   * Stops all animations
+   * Stops all LOCAL-owned animations.
+   *
+   * Scoped to {@link getOwnedAnimationGroups} so remote peer clips are not silenced.
    */
   public stopAllAnimations(): void {
-    this.scene.animationGroups.forEach((anim: BABYLON.AnimationGroup) => {
+    for (const anim of this.getOwnedAnimationGroups()) {
       anim.stop();
-    });
+    }
 
     this.currentAnimation = null;
     this.previousAnimation = null;
