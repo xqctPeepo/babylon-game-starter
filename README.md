@@ -124,6 +124,7 @@ eslint.config.js
 - **[SERIALIZATION_GUIDE.md](SERIALIZATION_GUIDE.md)** — State serialization, deserialization, and mesh application
 - **[SERIALIZATION_QUICK_REF.md](SERIALIZATION_QUICK_REF.md)** — Cheat-sheet for the serialization helpers
 - **[src/deployment/DEPLOYMENT.md](src/deployment/DEPLOYMENT.md)** — Settings-driven deploy, Docker, host artifacts
+- **[NETLIFY_STATIC_SITE_DEPLOYMENT.md](NETLIFY_STATIC_SITE_DEPLOYMENT.md)** — Static Netlify deployment and multiplayer configuration
 - **[RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)** — Production deploy on Render.com
 - **[STYLE.md](STYLE.md)** — TypeScript / ESLint / Prettier expectations for contributors
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — Dev setup, PR workflow, commit conventions, and SemVer policy
